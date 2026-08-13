@@ -1,0 +1,705 @@
+# manage.py — orchestrator for the PrivacyDuck removal pipeline.
+#
+# Spawns 5 worker threads:
+#   0 — process_groups()              kind=0 (scan) + kind=3 (google_scan)
+#   1 — placeholder (no-op)           kept for back-compat with executor.map
+#   2 — process_groups_removal()      kind=1 (removal)
+#   3 — process_groups_face_removal() kind=4 (face removal)
+#   4 — socketio.run()                Flask + Socket.IO server (blocking)
+#
+# Lifecycle invariants this rewrite enforces:
+#   - Every MySQL connection acquired in a loop iteration is closed in a
+#     try/finally. The previous version closed conns only on the happy
+#     path; any exception inside the loop body leaked them, which after
+#     ~hours of uptime exhausted the DO managed-MySQL connection budget.
+#   - Cursors are explicitly closed (mysql-connector-python tracks cursors
+#     per connection; orphaning them eats memory).
+#   - All UPDATE statements use parameter substitution. Values come from the
+#     DB so this isn't an injection risk per se, but it makes the queries
+#     resilient against weird unicode in target_domain and gives prepared
+#     statements a chance to cache.
+#   - last_removal_processed_at is a bounded dict (~OrderedDict-as-LRU). The
+#     old plain dict grew unbounded — one entry per user_id ever seen, never
+#     evicted, costing real memory on the long-running process.
+#   - upload_file_to_server has a request timeout, status-code check, and
+#     stops trying to .json()-parse responses that aren't JSON.
+#   - ModuleMissing from the dispatcher is caught distinctly and the row is
+#     marked step=4 ("not implemented") instead of step=3 ("failed"), which
+#     keeps the 376K unimplemented scan rows from polluting the failure
+#     dashboards.
+#
+# step values used (results.step is an int, no enum constraint in the table):
+#   0  queued
+#   1  in_flight (claimed by a worker)
+#   2  done
+#   3  failed (broker module ran but errored)
+#   4  not_implemented (no sites/<domain>.py file — informational, won't retry)
+#   5  skipped_missing_pii (user record was incomplete; user must fix profile)
+import os
+import sys
+import time
+import json
+import logging
+import threading
+import concurrent.futures
+from collections import OrderedDict
+
+import mysql.connector
+import requests
+from flask import Flask, request
+from flask_socketio import SocketIO, join_room
+
+from __scan import scan as scan_dispatch, ModuleMissing as ScanModuleMissing
+from __scanGoogle import google_scan as google_scan_dispatch, ModuleMissing as GoogleScanModuleMissing
+from __removal import (
+    removal as removal_dispatch,
+    ModuleMissing as RemovalModuleMissing,
+    IncompletePII,
+)
+from lib.broker_helpers import CCPADailyLimitReached
+from __face_removal import face_removal
+from lib.automation_delay import enable_automation_delays
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
+    stream=sys.stderr,
+)
+logging.getLogger("socketio").setLevel(logging.ERROR)
+logging.getLogger("engineio").setLevel(logging.ERROR)
+log = logging.getLogger("pd.removal")
+
+
+# ----- env loading ----------------------------------------------------------
+
+def _load_env_file(env_path):
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("'").strip('"')
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+def _get_env_bool(key, default=False):
+    value = os.getenv(key)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_env_int(key, default):
+    try:
+        return int(os.getenv(key, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_env_float(key, default):
+    try:
+        return float(os.getenv(key, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+_load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
+enable_automation_delays()
+
+
+# ----- config ---------------------------------------------------------------
+
+DB_HOST = os.getenv("DB_HOST")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+if not (DB_HOST and DB_USER and DB_PASSWORD):
+    sys.exit("FATAL: DB_HOST / DB_USER / DB_PASSWORD env vars are required (check .env).")
+DB_NAME = os.getenv("DB_NAME", "privacyduck")
+DB_PORT = _get_env_int("DB_PORT", 25060)
+DB_SSL_CA = os.getenv("DB_SSL_CA", "")
+DB_SSL_VERIFY_CERT = _get_env_bool("DB_SSL_VERIFY_CERT", False)
+
+REMOVAL_TARGET_DAYS_PER_USER = _get_env_float("REMOVAL_TARGET_DAYS_PER_USER", 7.0)
+REMOVAL_TARGET_TOTAL_PER_USER = _get_env_int("REMOVAL_TARGET_TOTAL_PER_USER", 413)
+REMOVAL_MIN_INTERVAL_SECONDS = _get_env_float("REMOVAL_MIN_INTERVAL_SECONDS", 0.0)
+if REMOVAL_MIN_INTERVAL_SECONDS <= 0:
+    REMOVAL_MIN_INTERVAL_SECONDS = max(
+        1.0,
+        (REMOVAL_TARGET_DAYS_PER_USER * 24 * 60 * 60) / max(1, REMOVAL_TARGET_TOTAL_PER_USER),
+    )
+
+# Cap on how many user_id->timestamp pairs we keep in last_removal_processed_at.
+# Beyond this we evict oldest. At 10K entries the dict is ~1MB which is plenty
+# of room without growing unbounded over weeks of uptime.
+REMOVAL_INTERVAL_DICT_MAXSIZE = _get_env_int("REMOVAL_INTERVAL_DICT_MAXSIZE", 10000)
+
+UPLOAD_TIMEOUT_SECONDS = _get_env_float("UPLOAD_TIMEOUT_SECONDS", 30.0)
+LOOP_IDLE_SLEEP_SECONDS = _get_env_float("LOOP_IDLE_SLEEP_SECONDS", 5.0)
+PD_UPLOAD_SECRET = os.getenv("PD_UPLOAD_SECRET", "").strip()
+if not PD_UPLOAD_SECRET:
+    log.warning(
+        "PD_UPLOAD_SECRET is not set in .env; PHP /…_api/upload endpoints "
+        "will reject our uploads with 403 until both sides have the same "
+        "secret. Set it on the web VPS first, then mirror here, then "
+        "restart pd-removal."
+    )
+
+SCAN_UPLOAD_URL_TEMPLATE = os.getenv(
+    "SCAN_UPLOAD_URL_TEMPLATE",
+    "https://privacyduck.com/scan_api/upload?domain={domain}&user_id={user_id}",
+)
+GOOGLE_SCAN_UPLOAD_URL_TEMPLATE = os.getenv(
+    "GOOGLE_SCAN_UPLOAD_URL_TEMPLATE",
+    "https://privacyduck.com/googleScan_api/upload?domain={domain}&user_id={user_id}",
+)
+REMOVAL_UPLOAD_URL_TEMPLATE = os.getenv(
+    "REMOVAL_UPLOAD_URL_TEMPLATE",
+    "https://privacyduck.com/removal_api/upload?domain={domain}&user_id={user_id}",
+)
+FACE_REMOVAL_UPLOAD_URL_TEMPLATE = os.getenv(
+    "FACE_REMOVAL_UPLOAD_URL_TEMPLATE",
+    "https://privacyduck.com/faceremoval_api/upload?domain={domain}&user_id={user_id}",
+)
+
+SOCKET_SERVER_HOST = os.getenv("SOCKET_SERVER_HOST", "144.126.136.20")
+SOCKET_SERVER_PORT = _get_env_int("SOCKET_SERVER_PORT", 443)
+SOCKET_SERVER_SSL_CERT = os.getenv("SOCKET_SERVER_SSL_CERT", "C:/Certbot/live/sayloapp.com/fullchain.pem")
+SOCKET_SERVER_SSL_KEY = os.getenv("SOCKET_SERVER_SSL_KEY", "C:/Certbot/live/sayloapp.com/privkey.pem")
+SOCKET_SERVER_USE_SSL = _get_env_bool("SOCKET_SERVER_USE_SSL", True)
+
+log.info(
+    "config removal_pacing min_interval_seconds=%s target_days=%s target_total=%s",
+    REMOVAL_MIN_INTERVAL_SECONDS, REMOVAL_TARGET_DAYS_PER_USER, REMOVAL_TARGET_TOTAL_PER_USER,
+)
+
+
+db_config = {
+    "host": DB_HOST,
+    "user": DB_USER,
+    "password": DB_PASSWORD,
+    "database": DB_NAME,
+    "port": DB_PORT,
+    "ssl_ca": DB_SSL_CA,
+    "ssl_verify_cert": DB_SSL_VERIFY_CERT,
+}
+
+
+# ----- Flask + SocketIO -----------------------------------------------------
+
+app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+
+@app.route("/")
+def index():
+    return "SocketIO Real-time Server"
+
+
+@app.route("/health")
+def health():
+    """Simple liveness probe — useful for NSSM monitoring + load balancers."""
+    return {"ok": True, "ts": int(time.time())}
+
+
+@socketio.on("connect")
+def handle_connect():
+    log.info("client connected sid=%s", request.sid)
+
+
+@socketio.on("join")
+def handle_join(data):
+    try:
+        if isinstance(data, dict):
+            user_id = data.get("user_id")
+        else:
+            user_id = str(data)
+        if user_id:
+            join_room(user_id)
+            log.info("client joined user_id=%s", user_id)
+        else:
+            log.warning("join with no user_id")
+    except Exception:
+        log.exception("error handling join")
+
+
+# ----- bounded LRU for per-user pacing --------------------------------------
+
+class _BoundedDict(OrderedDict):
+    """OrderedDict that drops the oldest entry once it exceeds maxsize."""
+
+    def __init__(self, maxsize):
+        super().__init__()
+        self._maxsize = maxsize
+        self._lock = threading.Lock()
+
+    def set(self, key, value):
+        with self._lock:
+            if key in self:
+                self.move_to_end(key)
+            self[key] = value
+            while len(self) > self._maxsize:
+                self.popitem(last=False)
+
+    def get_value(self, key):
+        with self._lock:
+            return self.get(key)
+
+
+last_removal_processed_at = _BoundedDict(REMOVAL_INTERVAL_DICT_MAXSIZE)
+
+
+# ----- shared DB helper -----------------------------------------------------
+
+def _set_step(conn, row_id, new_step, reason=None):
+    """Single source of truth for step transitions. Parameterized."""
+    cur = conn.cursor()
+    try:
+        cur.execute("UPDATE results SET step = %s WHERE id = %s", (new_step, row_id))
+        conn.commit()
+        if reason:
+            log.info("step %s -> id=%s reason=%s", new_step, row_id, reason)
+    finally:
+        cur.close()
+
+
+# ----- upload helper --------------------------------------------------------
+
+def upload_file_to_server(url, file_path):
+    """POST `file_path` as multipart to `url`. Returns parsed JSON on
+    Content-Type: application/json, else returns the raw text on success,
+    None on failure. Has a real timeout and surfaces failures via logging
+    instead of swallowing them."""
+    if not file_path or not os.path.exists(file_path):
+        log.warning("upload skipped (file missing): %s", file_path)
+        return None
+    try:
+        headers = {}
+        if PD_UPLOAD_SECRET:
+            # Authenticates us to the PHP upload endpoints. Bypasses CSRF
+            # for server-to-server calls (the browser-CSRF path stays
+            # intact for any future user-driven upload).
+            headers["X-PD-Upload-Secret"] = PD_UPLOAD_SECRET
+        with open(file_path, "rb") as fh:
+            files = {"file": (os.path.basename(file_path), fh, "application/octet-stream")}
+            resp = requests.post(url, files=files, headers=headers, timeout=UPLOAD_TIMEOUT_SECONDS)
+        if not resp.ok:
+            log.warning("upload non-2xx %s -> %s: %s", file_path, resp.status_code, resp.text[:200])
+            return None
+        ctype = resp.headers.get("content-type", "")
+        if "application/json" in ctype:
+            try:
+                return resp.json()
+            except json.JSONDecodeError:
+                log.warning("upload claimed JSON content-type but body wasn't valid JSON: %s", resp.text[:200])
+                return None
+        return resp.text
+    except Exception:
+        log.exception("upload failed url=%s file=%s", url, file_path)
+        return None
+
+
+# ----- query helpers --------------------------------------------------------
+
+def _fetch_pending(conn, query, params=()):
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute(query, params)
+        return cur.fetchall() or []
+    finally:
+        cur.close()
+
+
+def get_pending_google_scan(conn):
+    return _fetch_pending(conn, """
+        SELECT t.*, u.email, u.firstname, u.lastname, u.city, u.zip, u.state, u.age
+        FROM (SELECT * FROM results WHERE step = 0 AND kind = 3 LIMIT 1000) AS t
+        LEFT JOIN users u ON t.user_id = u.id
+    """)
+
+
+def get_pending_scan(conn):
+    return _fetch_pending(conn, """
+        SELECT t.*, u.email, u.firstname, u.lastname, u.city, u.zip, u.state, u.age
+        FROM (SELECT * FROM results WHERE step = 0 AND kind = 0 LIMIT 1000) AS t
+        LEFT JOIN users u ON t.user_id = u.id
+    """)
+
+
+def get_pending_removal(conn):
+    # FAIRNESS FIX 2026-05-28: previous version had
+    #   ORDER BY user_id ASC LIMIT 1000
+    # which monopolized the first ~5 user_ids (they had 1164+ rows
+    # combined). Every paid user with user_id > 58 was starved -- saw
+    # ZERO removal activity even after weeks of paid service.
+    #
+    # New: ROW_NUMBER() window function partitions by user_id so each
+    # user contributes up to 10 rows per tick. With ~100 paid users
+    # that's a 1000-row batch divided fairly.
+    return _fetch_pending(conn, """
+        SELECT
+            id, user_id, target_domain, step, kind, removal_url, site_url, planable,
+            JSON_UNQUOTE(data->'$.email')       AS email,
+            JSON_UNQUOTE(data->'$.firstname')   AS firstname,
+            JSON_UNQUOTE(data->'$.lastname')    AS lastname,
+            JSON_UNQUOTE(data->'$.age')         AS age,
+            JSON_UNQUOTE(data->'$.city')        AS city,
+            JSON_UNQUOTE(data->'$.zip')         AS zip,
+            JSON_UNQUOTE(data->'$.state')       AS state,
+            JSON_UNQUOTE(data->'$.phone')       AS phone,
+            JSON_UNQUOTE(data->'$.address')     AS address,
+            JSON_UNQUOTE(data->'$.birth_day')   AS birth_day,
+            JSON_UNQUOTE(data->'$.birth_month') AS birth_month,
+            JSON_UNQUOTE(data->'$.birth_year')  AS birth_year,
+            JSON_UNQUOTE(data->'$.area_code')   AS area_code,
+            JSON_UNQUOTE(data->'$.street')      AS street,
+            JSON_UNQUOTE(data->'$.county')      AS county
+        FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id) AS rn
+            FROM results
+            WHERE step = 0 AND kind = 1 AND planable = 1
+        ) ranked
+        WHERE rn <= 10
+        ORDER BY user_id ASC, id ASC
+        LIMIT 1000
+    """)
+
+
+def get_pending_face_removal(conn):
+    return _fetch_pending(conn, """
+        SELECT r.id, r.user_id, r.target_domain, r.step, r.kind, r.planable,
+               u.email, u.url AS face_filename
+        FROM results r
+        LEFT JOIN users u ON r.user_id = u.id
+        WHERE r.step = 0 AND r.kind = 4 AND (r.planable = 1 OR r.planable IS NULL)
+        ORDER BY r.user_id ASC, r.id ASC
+        LIMIT 1000
+    """)
+
+
+def _claim_row(conn, row_id, kind, require_planable=False):
+    """Atomic CAS: only sets step=1 if it's still step=0. Returns True on
+    successful claim, False if someone else got it first."""
+    cur = conn.cursor()
+    try:
+        if require_planable:
+            cur.execute(
+                "UPDATE results SET step = 1 WHERE id = %s AND step = 0 AND kind = %s AND planable = 1",
+                (row_id, kind),
+            )
+        else:
+            cur.execute(
+                "UPDATE results SET step = 1 WHERE id = %s AND step = 0 AND kind = %s",
+                (row_id, kind),
+            )
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        cur.close()
+
+
+# ----- worker bodies --------------------------------------------------------
+
+def process_groups_google_scan():
+    """ONE tick — pulls up to 1000 google-scan rows and processes them all.
+    Caller loops; we don't loop internally."""
+    conn = None
+    try:
+        conn = mysql.connector.connect(**db_config)
+        data = get_pending_google_scan(conn)
+        if not data:
+            return
+        log.info("google_scan tick: %d rows", len(data))
+        for row in data:
+            try:
+                socketio.emit("progress", {
+                    "id": row["id"], "user_id": row["user_id"],
+                    "target_domain": row["target_domain"], "kind": 3,
+                }, room=str(row["user_id"]))
+                try:
+                    path = google_scan_dispatch(
+                        socketio, row["target_domain"], row["id"], row["user_id"],
+                        row["email"], row["firstname"], row["lastname"],
+                        row["city"], row["zip"], row["state"], row["age"],
+                    )
+                    _set_step(conn, row["id"], 2)
+                    socketio.emit("complete", {
+                        "id": row["id"], "user_id": row["user_id"],
+                        "target_domain": row["target_domain"], "kind": 3,
+                    }, room=str(row["user_id"]))
+                    upload_file_to_server(
+                        GOOGLE_SCAN_UPLOAD_URL_TEMPLATE.format(
+                            domain=row["target_domain"], user_id=row["user_id"]),
+                        path,
+                    )
+                except GoogleScanModuleMissing:
+                    _set_step(conn, row["id"], 4, "module_missing")
+                except Exception:
+                    log.exception("google_scan row failed id=%s", row["id"])
+                    _set_step(conn, row["id"], 3, "broker_raised")
+            except Exception:
+                log.exception("google_scan outer row error id=%s", row.get("id"))
+    except Exception:
+        log.exception("google_scan tick failed")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                log.exception("conn.close failed (google_scan)")
+
+
+def process_groups():
+    """Worker 0: scan loop (also pumps google_scan once per tick)."""
+    while True:
+        process_groups_google_scan()
+        conn = None
+        try:
+            conn = mysql.connector.connect(**db_config)
+            data = get_pending_scan(conn)
+            if data:
+                log.info("scan tick: %d rows", len(data))
+                for row in data:
+                    try:
+                        # Policy May 2026: we used to upfront-reject any row
+                        # whose user was missing city/zip/state/age and set
+                        # step=5 so the scan loop would skip them forever
+                        # (well, until the dashboard reset them). New policy:
+                        # let the scan run regardless. Per-broker validation
+                        # in the removal worker downstream raises
+                        # IncompletePII for the brokers that genuinely need
+                        # a missing field, and only those rows get marked
+                        # step=5. Brokers that work with just name+email
+                        # succeed for everyone.
+
+                        socketio.emit("progress", {
+                            "id": row["id"], "user_id": row["user_id"],
+                            "target_domain": row["target_domain"], "kind": 0,
+                        }, room=str(row["user_id"]))
+
+                        try:
+                            path = scan_dispatch(
+                                socketio, row["target_domain"], row["id"], row["user_id"],
+                                row["email"], row["firstname"], row["lastname"],
+                                row["city"], row["zip"], row["state"], row["age"],
+                            )
+                            if path == "Not Found":
+                                _set_step(conn, row["id"], 3, "not_found")
+                            else:
+                                _set_step(conn, row["id"], 2)
+                                socketio.emit("complete", {
+                                    "id": row["id"], "user_id": row["user_id"],
+                                    "target_domain": row["target_domain"], "kind": 0,
+                                }, room=str(row["user_id"]))
+                                upload_file_to_server(
+                                    SCAN_UPLOAD_URL_TEMPLATE.format(
+                                        domain=row["target_domain"], user_id=row["user_id"]),
+                                    path,
+                                )
+                        except (ScanModuleMissing, NotImplementedError):
+                            _set_step(conn, row["id"], 4, "module_missing")
+                        except Exception:
+                            log.exception("scan row failed id=%s", row["id"])
+                            _set_step(conn, row["id"], 3, "broker_raised")
+                    except Exception:
+                        log.exception("scan outer row error id=%s", row.get("id"))
+        except Exception:
+            log.exception("scan tick failed")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    log.exception("conn.close failed (scan)")
+        time.sleep(LOOP_IDLE_SLEEP_SECONDS)
+
+
+def process_groups_removal():
+    """Worker 2: removal loop. Includes per-user pacing throttle and atomic
+    CAS claim to avoid double-processing if we ever run multiple instances."""
+    while True:
+        conn = None
+        try:
+            conn = mysql.connector.connect(**db_config)
+            data = get_pending_removal(conn)
+            log.info("removal tick: %d rows", len(data))
+            if data:
+                for row in data:
+                    try:
+                        user_id_str = str(row["user_id"])
+                        now_ts = time.time()
+                        last_ts = last_removal_processed_at.get_value(user_id_str)
+                        if last_ts and (now_ts - last_ts) < REMOVAL_MIN_INTERVAL_SECONDS:
+                            continue
+
+                        if not _claim_row(conn, row["id"], kind=1, require_planable=True):
+                            continue
+
+                        socketio.emit("progress", {
+                            "id": row["id"], "user_id": row["user_id"],
+                            "target_domain": row["target_domain"], "kind": 1,
+                        }, room=str(row["user_id"]))
+
+                        try:
+                            path = removal_dispatch(
+                                socketio, row["target_domain"], row["site_url"],
+                                row["id"], row["user_id"],
+                                row["email"], row["firstname"], row["lastname"],
+                                row["city"], row["zip"], row["state"], row["age"],
+                                row["address"], row["phone"],
+                                row["birth_day"], row["birth_month"], row["birth_year"],
+                                row["area_code"], row["street"], row["county"],
+                            )
+                            _set_step(conn, row["id"], 2)
+                            socketio.emit("complete", {
+                                "id": row["id"], "user_id": row["user_id"],
+                                "target_domain": row["target_domain"], "kind": 1,
+                            }, room=str(row["user_id"]))
+                            upload_file_to_server(
+                                REMOVAL_UPLOAD_URL_TEMPLATE.format(
+                                    domain=row["target_domain"], user_id=row["user_id"]),
+                                path,
+                            )
+                            last_removal_processed_at.set(user_id_str, time.time())
+                        except (RemovalModuleMissing, NotImplementedError):
+                            _set_step(conn, row["id"], 4, "module_missing")
+                            # Don't update the pacing timer — a missing-module
+                            # "skip" shouldn't burn this user's rate window.
+                        except IncompletePII as e:
+                            _set_step(conn, row["id"], 5, "missing_pii:" + ",".join(e.args[0]))
+                        except CCPADailyLimitReached as e:
+                            # Per-user daily CCPA email cap hit. Leave the row
+                            # at step=0 so it gets retried tomorrow (counter resets at midnight).
+                            _set_step(conn, row["id"], 0)
+                            log.info("ccpa throttle: id=" + str(row["id"]) + " " + str(e))
+                        except Exception:
+                            log.exception("removal row failed id=%s", row["id"])
+                            _set_step(conn, row["id"], 3, "broker_raised")
+                            last_removal_processed_at.set(user_id_str, time.time())
+                    except Exception:
+                        log.exception("removal outer row error id=%s", row.get("id"))
+        except Exception:
+            log.exception("removal tick failed")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    log.exception("conn.close failed (removal)")
+        time.sleep(LOOP_IDLE_SLEEP_SECONDS)
+
+
+def process_groups_face_removal():
+    """Worker 3: face-removal loop."""
+    while True:
+        conn = None
+        try:
+            conn = mysql.connector.connect(**db_config)
+            data = get_pending_face_removal(conn)
+            if data:
+                log.info("face_removal tick: %d rows", len(data))
+                for row in data:
+                    try:
+                        if not _claim_row(conn, row["id"], kind=4):
+                            continue
+                        socketio.emit("progress", {
+                            "id": row["id"], "user_id": row["user_id"],
+                            "target_domain": row["target_domain"], "kind": 4,
+                        }, room=str(row["user_id"]))
+                        try:
+                            path = face_removal(
+                                socketio, row["target_domain"], row["id"], row["user_id"],
+                                row.get("email") or "",
+                                row.get("face_filename") or "",
+                                run_mode="non-headless",
+                            )
+                            _set_step(conn, row["id"], 2)
+                            socketio.emit("complete", {
+                                "id": row["id"], "user_id": row["user_id"],
+                                "target_domain": row["target_domain"], "kind": 4,
+                            }, room=str(row["user_id"]))
+                            if path:
+                                upload_file_to_server(
+                                    FACE_REMOVAL_UPLOAD_URL_TEMPLATE.format(
+                                        domain=row["target_domain"], user_id=row["user_id"]),
+                                    path,
+                                )
+                            log.info("face_removal ok id=%s user=%s domain=%s",
+                                     row["id"], row["user_id"], row["target_domain"])
+                            try:
+                                cur = conn.cursor()
+                                try:
+                                    cur.execute(
+                                        "UPDATE users SET face_manual_removed = 1 WHERE id = %s",
+                                        (row["user_id"],),
+                                    )
+                                    conn.commit()
+                                finally:
+                                    cur.close()
+                            except Exception:
+                                log.exception("face_removal users update failed user=%s", row["user_id"])
+                        except Exception:
+                            log.exception("face_removal row failed id=%s", row["id"])
+                            _set_step(conn, row["id"], 3, "broker_raised")
+                    except Exception:
+                        log.exception("face_removal outer row error id=%s", row.get("id"))
+        except Exception:
+            log.exception("face_removal tick failed")
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    log.exception("conn.close failed (face_removal)")
+        time.sleep(LOOP_IDLE_SLEEP_SECONDS)
+
+
+# ----- worker entry ---------------------------------------------------------
+
+def runs(x):
+    if x == 0:
+        process_groups()
+    elif x == 1:
+        # Reserved slot — historically ran google_scan as a separate thread
+        # but it's now pumped from process_groups() to share the same conn
+        # lifecycle. Keep the slot so executor.map(range(5)) still works.
+        pass
+    elif x == 2:
+        process_groups_removal()
+    elif x == 3:
+        process_groups_face_removal()
+    else:
+        ssl_context = None
+        if SOCKET_SERVER_USE_SSL:
+            ssl_context = (SOCKET_SERVER_SSL_CERT, SOCKET_SERVER_SSL_KEY)
+        socketio.run(
+            app,
+            port=SOCKET_SERVER_PORT,
+            host=SOCKET_SERVER_HOST,
+            ssl_context=ssl_context,
+            debug=False,
+        )
+
+
+if "--reset-claims" in sys.argv:
+    _conn = mysql.connector.connect(**db_config)
+    try:
+        _cur = _conn.cursor()
+        try:
+            _cur.execute("UPDATE results SET step = 0 WHERE step = 1")
+            _conn.commit()
+            log.warning("--reset-claims: reset %d step=1 rows back to step=0", _cur.rowcount)
+        finally:
+            _cur.close()
+    finally:
+        _conn.close()
+
+
+if __name__ == "__main__":
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        executor.map(runs, range(5))

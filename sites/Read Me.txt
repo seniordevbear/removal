@@ -1,0 +1,10 @@
+-------------You must install Drission Page library.--------------
+pip install drissionpage
+
+--------------You must install twocaptcha libary-----------------
+pip install 2captcha-python
+
+--------------Run file -------------------------------------------
+__main__.py
+
+

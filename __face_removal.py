@@ -1,0 +1,77 @@
+# __face_removal.py — dispatcher for kind=4 (face removal) rows.
+#
+# Same shape as __removal.py / __scan.py. Catches ModuleNotFoundError
+# specifically so missing brokers can be marked step=4 (not_implemented)
+# rather than step=3 (failed).
+import importlib
+import sys
+import os
+import datetime
+import logging
+import traceback
+from typing import Dict, Any, Optional
+
+from face_removal import get_user_face_image_path_from_filename
+
+log = logging.getLogger("pd.face_dispatch")
+
+
+class ModuleMissing(Exception):
+    pass
+
+
+def _import_face_broker(target_domain):
+    """face removal targets live in sites/ (e.g. sites/pimeyescom)."""
+    module_name = "sites." + target_domain
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as e:
+        if getattr(e, "name", None) == module_name:
+            raise ModuleMissing(target_domain) from e
+        raise
+
+
+def face_removal(sio, target_domain: str, req_id: int, user_id: int,
+                 user_email: str, face_filename: str,
+                 run_mode: str = "non-headless",
+                 extra: Optional[Dict[str, Any]] = None):
+    """Run a face-removal broker. Returns screenshot path on success."""
+    base_dir = os.getcwd()
+    screenshot_dir = os.path.join(base_dir, "ScreenShot", datetime.datetime.now().strftime("%Y-%m-%d"))
+    os.makedirs(screenshot_dir, exist_ok=True)
+
+    face_image_path = get_user_face_image_path_from_filename(face_filename)
+
+    data_row: Dict[str, Any] = {
+        "User Email": user_email or "",
+        "Face Filename": face_filename or "",
+        "Face Image Path": face_image_path,
+    }
+    if extra:
+        data_row.update(extra)
+
+    try:
+        module = _import_face_broker(target_domain)
+    except ModuleMissing:
+        print(f"[FACE_MODULE_MISSING] req_id={req_id} user_id={user_id} domain={target_domain}",
+              file=sys.stderr, flush=True)
+        raise
+
+    fn = getattr(module, target_domain, None)
+    if not callable(fn):
+        raise AttributeError(f"sites.{target_domain}: no callable named '{target_domain}'")
+
+    try:
+        return fn(data_row, target_domain, user_email or "", run_mode=run_mode)
+    except ModuleNotFoundError as e:
+        # Stubs raise from inside the function — treat as not_implemented.
+        if str(e).startswith("sites."):
+            print(f"[FACE_MODULE_MISSING_INVOKE] req_id={req_id} user_id={user_id} domain={target_domain}",
+                  file=sys.stderr, flush=True)
+            raise ModuleMissing(target_domain) from e
+        raise
+    except Exception:
+        print(f"[FACE_BROKER_RAISED] req_id={req_id} user_id={user_id} domain={target_domain}",
+              file=sys.stderr)
+        traceback.print_exc()
+        raise

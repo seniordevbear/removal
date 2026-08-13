@@ -1,0 +1,184 @@
+# __removal.py — orchestration entry for kind=1 (removal) work.
+#
+# Responsibilities (this layer only):
+#   1. Validate PII coming from the DB. NEVER fabricate defaults that go
+#      out to a broker. If we don't have a city/zip/etc., we REFUSE and let
+#      the caller mark the row failed — sending a real opt-out request with
+#      "Los Angeles / California / 90029" against the wrong identity is
+#      both wrong (we'd match the wrong record) and a likely ToS violation.
+#   2. Import the broker module from `sites/<target_domain>`. Catch
+#      ModuleNotFoundError specifically and raise a distinct exception so
+#      the caller can mark the row as "module not implemented" (step=4)
+#      rather than "failed" (step=3). This keeps the dashboards from
+#      counting unimplemented brokers as failures.
+#   3. Call the broker's entrypoint inside a timeout. If it raises, the
+#      exception propagates with full traceback for upstream logging.
+#
+# Hard rule: this file MUST NOT contain hardcoded credentials, PII
+# defaults, or fallback values that get sent to brokers.
+import importlib
+import sys
+import traceback
+
+
+REQUIRED_FIELDS = (
+    "Name", "City", "State", "Zipcode",
+    "Address", "Birth Day", "Birth Month", "Birth Year",
+)
+
+
+class ModuleMissing(Exception):
+    """Raised when sites.<target_domain> doesn't exist on disk.
+    Caller should mark the row with a distinct status (not generic failure)."""
+
+
+class IncompletePII(Exception):
+    """Raised when a removal row is missing fields needed to safely contact
+    the broker. Caller should mark the row as needing user attention."""
+
+
+def _build_data_row(email, firstname, lastname, city, zip, state, age,
+                    address, phone, birth_day, birth_month, birth_year,
+                    area_code, street, county):
+    """Build the dataRow dict broker scripts expect. ALL values are passed
+    through unchanged: if the caller has e.g. county="" then we pass "".
+    We do NOT substitute defaults here. Validation happens in
+    `validate_required_pii` below."""
+    name_full = "{} {}".format((firstname or "").strip(), (lastname or "").strip()).strip()
+    return {
+        "Verification Email": "webremovals@privacypros.com",
+        "User Email": email or "",
+        "Title": "Ms.",
+        "Name": name_full,
+        "Age": age if age else "",
+        "Birth Day": birth_day or "",
+        "Birth Month": birth_month or "",
+        "Birth Year": birth_year or "",
+        "Address": address or "",
+        "Area Code": area_code or "",
+        "Phone Number": phone or "",
+        "Street": street or "",
+        "Apartment": "",
+        "City": city or "",
+        "State": state or "",
+        "Zipcode": zip or "",
+        "County": county or "",
+        # These four were previously hardcoded fake values that got POSTed to
+        # brokers. Empty strings are safer: broker scripts will either accept
+        # them or visibly fail validation, but at least we're not impersonating
+        # someone else with plausible-looking data.
+        "Advertising Id": "",
+        "Job Title": "",
+        "Business Name": "",
+        "LinkedIn Profile": "",
+        "Status": "",
+    }
+
+
+def validate_required_pii(data_row, target_domain):
+    """Returns (ok: bool, missing: list[str]). Empty/None counts as missing."""
+    missing = []
+    for field in REQUIRED_FIELDS:
+        val = data_row.get(field)
+        if val is None or (isinstance(val, str) and val.strip() == ""):
+            missing.append(field)
+    return (len(missing) == 0), missing
+
+
+def _import_broker(target_domain):
+    """Import sites.<target_domain>. Distinguishes 'module file missing' from
+    'module file exists but has an import-time error' — the latter is a bug
+    in the broker script and shouldn't be silenced as "not implemented"."""
+    module_name = "sites." + target_domain
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as e:
+        # e.name tells us *which* module was missing. If it's our broker module
+        # itself, that's "not implemented". If something downstream is
+        # missing (e.g. `from twocaptcha import TwoCaptcha` failed), that's a
+        # real bug to surface.
+        if getattr(e, "name", None) == module_name:
+            raise ModuleMissing(target_domain) from e
+        # downstream import error — re-raise so it shows up as a real failure
+        raise
+
+
+def removal(sio, target_domain, site_url, req_id, user_id, email, firstname,
+            lastname, city, zip, state, age, address, phone, birth_day,
+            birth_month, birth_year, area_code, street, county):
+    """Main entry. Returns the screenshot path on success.
+    On failure, raises (caller in manage.py catches and updates DB)."""
+    data_row = _build_data_row(
+        email, firstname, lastname, city, zip, state, age,
+        address, phone, birth_day, birth_month, birth_year,
+        area_code, street, county,
+    )
+
+    ok, missing = validate_required_pii(data_row, target_domain)
+    if not ok:
+        # Surface a structured error so manage.py can mark the row with a
+        # specific status and log which fields are missing for ops to fix.
+        print(
+            "[REMOVAL_SKIPPED_MISSING_PII] req_id={} user_id={} domain={} missing={}".format(
+                req_id, user_id, target_domain, ",".join(missing)
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        raise IncompletePII(missing)
+
+    try:
+        module = _import_broker(target_domain)
+    except ModuleMissing:
+        # Don't print traceback for this — it's an expected condition we want
+        # the caller to handle cleanly.
+        print(
+            "[REMOVAL_MODULE_MISSING] req_id={} user_id={} domain={}".format(
+                req_id, user_id, target_domain
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
+
+    fn = getattr(module, target_domain, None)
+    if not callable(fn):
+        # The module imported but doesn't export a function with the expected
+        # name. Treat as a bug to surface (not as "missing").
+        raise AttributeError(
+            "sites.{}: no callable named '{}'".format(target_domain, target_domain)
+        )
+
+    clean_site_url = (site_url or "").replace("https://", "").replace("http://", "")
+
+    try:
+        return fn(data_row, clean_site_url, data_row["User Email"], run_mode="non-headless")
+    except ModuleNotFoundError as e:
+        # Auto-generated stubs raise this from INSIDE the function (rather
+        # than at import time, which the _import_broker path above would
+        # catch). Treat it the same as a missing module so the row goes to
+        # step=4 (not_implemented) instead of step=3 (real failure).
+        if str(e).startswith("sites."):
+            print(
+                "[REMOVAL_MODULE_MISSING_INVOKE] req_id={} user_id={} domain={}".format(
+                    req_id, user_id, target_domain
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            raise ModuleMissing(target_domain) from e
+        # any other ModuleNotFoundError = a real bug in the broker (e.g.
+        # forgot a `pip install`) — keep the loud failure
+        raise
+    except Exception:
+        # Make sure broker tracebacks land in stderr so they're captured by
+        # NSSM's AppStderr rotation. The bare `print(e)` in the old manage.py
+        # threw away the traceback which made bug-hunting impossible.
+        print(
+            "[REMOVAL_BROKER_RAISED] req_id={} user_id={} domain={}".format(
+                req_id, user_id, target_domain
+            ),
+            file=sys.stderr,
+        )
+        traceback.print_exc()
+        raise

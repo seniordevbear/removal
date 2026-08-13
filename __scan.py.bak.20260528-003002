@@ -1,0 +1,93 @@
+# __scan.py — orchestration entry for kind=0 (scan) work.
+#
+# Companion to __removal.py — same hard rules:
+#   - No fabricated PII defaults. We pass user fields through unchanged.
+#   - ModuleNotFoundError from sites_scan.<domain> is raised as
+#     `ModuleMissing` so manage.py can mark the row distinctly. Today this
+#     matters a LOT: 408 of 413 scan domains have no module, generating
+#     376,309 step=3 (failed) rows that pollute dashboards. Promoting those
+#     to step=4 (not implemented) separates "broker we tried and failed"
+#     from "broker we never tried because we don't ship a script for it".
+import importlib
+import sys
+import traceback
+
+
+class ModuleMissing(Exception):
+    pass
+
+
+def _build_data_row(email, firstname, lastname, city, zip, state, age):
+    name_full = "{} {}".format((firstname or "").strip(), (lastname or "").strip()).strip()
+    return {
+        "Verification Email": "webremovals@privacypros.com",
+        "User Email": email or "",
+        "Title": "Ms.",
+        "Name": name_full,
+        # The old version substituted "none" / 20 for missing fields. We pass
+        # empties so broker scripts can detect-and-skip rather than search
+        # for the string "none" as if it were a real city.
+        "Age": age if age else "",
+        "Birth Day": "",
+        "Birth Month": "",
+        "Birth Year": "",
+        "Address": "",
+        "Area Code": "",
+        "Phone Number": "",
+        "Street": "",
+        "Apartment": "",
+        "City": city or "",
+        "State": state or "",
+        "Zipcode": zip or "",
+        "County": "",
+        "Advertising Id": "",
+        "Job Title": "",
+        "Business Name": "",
+        "LinkedIn Profile": "",
+        "Status": "",
+    }
+
+
+def _import_scan_module(target_domain):
+    module_name = "sites_scan." + target_domain
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as e:
+        if getattr(e, "name", None) == module_name:
+            raise ModuleMissing(target_domain) from e
+        raise
+
+
+def scan(sio, target_domain, req_id, user_id, email, firstname, lastname,
+         city, zip, state, age):
+    data_row = _build_data_row(email, firstname, lastname, city, zip, state, age)
+
+    try:
+        module = _import_scan_module(target_domain)
+    except ModuleMissing:
+        print(
+            "[SCAN_MODULE_MISSING] req_id={} user_id={} domain={}".format(
+                req_id, user_id, target_domain
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
+
+    fn = getattr(module, target_domain, None)
+    if not callable(fn):
+        raise AttributeError(
+            "sites_scan.{}: no callable named '{}'".format(target_domain, target_domain)
+        )
+
+    try:
+        return fn(data_row, "website", data_row["User Email"], run_mode="non-headless")
+    except Exception:
+        print(
+            "[SCAN_BROKER_RAISED] req_id={} user_id={} domain={}".format(
+                req_id, user_id, target_domain
+            ),
+            file=sys.stderr,
+        )
+        traceback.print_exc()
+        raise

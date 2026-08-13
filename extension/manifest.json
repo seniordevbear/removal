@@ -1,0 +1,23 @@
+
+    {
+        "manifest_version": 3,
+        "name": "Proxies",
+        "version": "1.0.0",
+        "permissions": [
+            "proxy",
+            "storage",
+            "webRequest",
+            "webRequestAuthProvider"
+        ],
+        "host_permissions": [
+            "<all_urls>"
+        ],
+        "background": {
+            "service_worker": "background.js"
+        },
+        "minimum_chrome_version": "88.0.0",
+        "action": {
+            "default_title": "Proxies"
+        }
+    }
+    
