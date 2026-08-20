@@ -25,6 +25,12 @@ Include/
 Scripts/
 pyvenv.cfg
 
+# On this Linux copy the whole venv sits under removal/ (Scripts, lib,
+# pyvenv.cfg). The 8 custom modules are now kept at the top-level lib/ —
+# the path manage.py actually imports and the path the VPS uses — so
+# excluding the venv folder no longer drops them.
+removal/
+
 # Belt and braces: the custom modules are tracked no matter what.
 !lib/*.py
 !Lib/*.py
