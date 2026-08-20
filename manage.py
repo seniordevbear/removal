@@ -825,6 +825,74 @@ PII_REQUEUE_LIMIT = _get_env_int("PII_REQUEUE_LIMIT", 2)
 PII_REQUEUE_BATCH = _get_env_int("PII_REQUEUE_BATCH", 2000)
 
 
+def _refresh_stale_row_pii():
+    """Rebuild results.data from the owner's CURRENT profile when the row's
+    snapshot predates it.
+
+    Root cause (seen live with user 907 on 2026-08-20): dashboard_bootstrap
+    creates every kind=1 row with a JSON snapshot of the profile AS OF THAT
+    MOMENT. Since the signup redesign, the profile is completed AFTER
+    payment — so rows created at first dashboard visit carry empty names
+    forever, and the dispatcher (which validates against the ROW's data, not
+    the users table) skips them with missing_pii even though the customer
+    long since filled everything in. Mirrors buildPayload() in
+    dashboard_bootstrap.php; also clears the pii_requeues counter, since
+    those requeues were spent on a row that could never have run.
+    """
+    conn = None
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE results r JOIN users u ON u.id = r.user_id "
+                "SET r.data = JSON_REMOVE(JSON_SET(COALESCE(r.data, '{}'), "
+                "  '$.email',     COALESCE(u.email, ''), "
+                "  '$.firstname', COALESCE(u.firstname, ''), "
+                "  '$.lastname',  COALESCE(u.lastname, ''), "
+                "  '$.age',       COALESCE(CAST(u.age AS CHAR), ''), "
+                "  '$.birth_day',   CASE WHEN u.birth_date IS NULL "
+                "       THEN COALESCE(r.data->>'$.birth_day', '') "
+                "       ELSE DATE_FORMAT(u.birth_date, '%d') END, "
+                "  '$.birth_month', CASE WHEN u.birth_date IS NULL "
+                "       THEN COALESCE(r.data->>'$.birth_month', '') "
+                "       ELSE DATE_FORMAT(u.birth_date, '%m') END, "
+                "  '$.birth_year',  CASE WHEN u.birth_date IS NULL "
+                "       THEN COALESCE(r.data->>'$.birth_year', '') "
+                "       ELSE DATE_FORMAT(u.birth_date, '%Y') END, "
+                "  '$.city',    COALESCE(u.city, ''), "
+                "  '$.zip',     COALESCE(u.zip, ''), "
+                "  '$.state',   COALESCE(u.state, ''), "
+                "  '$.phone',   COALESCE(u.phone, ''), "
+                "  '$.address', COALESCE(u.address, '')"
+                "), '$.pii_requeues'), "
+                "r.step = 0 "
+                "WHERE r.kind = 1 AND r.step IN (0, 5) "
+                "  AND TRIM(COALESCE(u.firstname, '')) <> '' "
+                "  AND TRIM(COALESCE(u.lastname, '')) <> '' "
+                "  AND (COALESCE(r.data->>'$.firstname', '') = '' "
+                "       OR COALESCE(r.data->>'$.lastname', '') = '')"
+                + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
+                   "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
+                   if REMOVAL_PAID_USERS_ONLY else "")
+            )
+            n = cur.rowcount
+            conn.commit()
+            if n:
+                log.info("pii snapshot refresh: rebuilt data for %d row(s) "
+                         "from completed profiles", n)
+        finally:
+            cur.close()
+    except Exception:
+        log.exception("pii snapshot refresh failed")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _requeue_recovered_pii():
     """Return step=5 rows to the queue once their owner has a usable name."""
     conn = None
@@ -886,11 +954,13 @@ def maintenance_loop():
     orphans from the previous run exist — then both tasks every interval.
     """
     _recover_stale_claims()
+    _refresh_stale_row_pii()
     _requeue_recovered_pii()
     while True:
         time.sleep(MAINTENANCE_INTERVAL_SECONDS)
         _recover_stale_claims()
         _reap_old_chrome()
+        _refresh_stale_row_pii()
         _requeue_recovered_pii()
 
 

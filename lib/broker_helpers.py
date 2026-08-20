@@ -712,8 +712,21 @@ def _ccpa_increment_or_raise(user_id, limit):
         try:
             with open(_CCPA_COUNTER_PATH, "r", encoding="utf-8") as f:
                 state = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError:
             state = {"date": today, "counts": {}}
+        except (json.JSONDecodeError, OSError):
+            # FAIL CLOSED. A truncated/unreadable counter is exactly what a
+            # full disk produces — and on 2026-07-17 this branch silently
+            # reset the count on every read, so the 50/day cap was forgotten
+            # and 2,343 opt-out emails went out in one day (SurgeMail warns
+            # at 500). Corrupt state now burns the REST of today's budget
+            # instead of granting an infinite one; the date rollover heals
+            # it tomorrow.
+            import logging as _logging
+            _logging.getLogger("pd.removal").error(
+                "ccpa counter file unreadable — treating today's quota as "
+                "spent (fail closed): %s", _CCPA_COUNTER_PATH)
+            state = {"date": today, "counts": {"_global": limit}}
         if state.get("date") != today:
             state = {"date": today, "counts": {}}
         uid = str(user_id)
@@ -880,8 +893,10 @@ def ccpa_global_quota_reached():
         try:
             with open(_CCPA_COUNTER_PATH, "r", encoding="utf-8") as f:
                 state = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError:
             return False
+        except (json.JSONDecodeError, OSError):
+            return True  # unreadable counter -> assume spent (fail closed)
     if state.get("date") != today:
         return False  # stale file: counter will reset on next increment
     return int(state.get("counts", {}).get("_global", 0)) >= CCPA_TOTAL_PER_DAY
