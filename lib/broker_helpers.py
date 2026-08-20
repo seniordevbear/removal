@@ -484,8 +484,14 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
     page = None
     screenshot_path = None
     try:
-        with safe_chromium_for_broker(broker_name, run_mode=run_mode,
-                                        screenshot_subdir="arrests_org") as page:
+        # run_mode is the broker-facing "headless"/"non-headless" string;
+        # safe_chromium_for_broker takes a boolean. (It once accepted
+        # run_mode/screenshot_subdir kwargs; the signature changed and this
+        # call was not updated — every arrests.org-family removal then died
+        # with TypeError before the browser even opened. screenshot_subdir
+        # is gone entirely: screenshot_step() names files by broker itself.)
+        with safe_chromium_for_broker(broker_name,
+                                      headless=(run_mode == "headless")) as page:
             log_step(broker_name, "GET " + url)
             page.get(url)
             sleep(2.5)

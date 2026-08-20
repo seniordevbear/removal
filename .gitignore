@@ -6,9 +6,13 @@
 # (contain logged-in sessions/cookies).
 ScreenShot*/
 screen_shot/
-sites_scan_google/
 user_data/
+# assets/ is a runtime cache (pimeyes _remote_cache), created on demand.
 assets/
+
+# NOTE: sites_scan_google/ is NOT ignored — despite the name it is source,
+# not output: __scanGoogle.py imports sites_scan_google.<domain> at runtime.
+# Same trap that lib/ fell into. Do not add it here.
 
 # Virtualenv.
 #
@@ -39,6 +43,7 @@ removal/
 __pycache__/
 *.pyc
 *.log
+logs/
 *.bak.*
 *.bak-*
 dump.rdb

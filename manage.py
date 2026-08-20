@@ -60,10 +60,25 @@ from lib.broker_helpers import CCPADailyLimitReached, ccpa_global_quota_reached
 from __face_removal import face_removal
 from lib.automation_delay import enable_automation_delays
 
+# Logs go BOTH to the console and to logs/removal.log. The console alone was
+# useless for postmortems: closing the window (or an RDP session ending) threw
+# the history away, which is why the July outage had no trail to read.
+# Rotation caps disk use at ~50MB — this machine already died once from an
+# unbounded directory, so nothing here may grow forever.
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+_log_handlers = [logging.StreamHandler(sys.stderr)]
+try:
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    from logging.handlers import RotatingFileHandler
+    _log_handlers.append(RotatingFileHandler(
+        os.path.join(_LOG_DIR, "removal.log"),
+        maxBytes=10 * 1024 * 1024, backupCount=4, encoding="utf-8"))
+except OSError as _e:
+    print("WARNING: file logging unavailable: %s" % _e, file=sys.stderr)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
-    stream=sys.stderr,
+    handlers=_log_handlers,
 )
 logging.getLogger("socketio").setLevel(logging.ERROR)
 logging.getLogger("engineio").setLevel(logging.ERROR)
@@ -145,6 +160,18 @@ REMOVAL_INTERVAL_DICT_MAXSIZE = _get_env_int("REMOVAL_INTERVAL_DICT_MAXSIZE", 10
 # _desktop_lock below — those cannot overlap with each other.
 # 12GB box: 3 removal browsers + the scan loops' browsers fits comfortably.
 REMOVAL_CONCURRENCY = max(1, _get_env_int("REMOVAL_CONCURRENCY", 3))
+
+# Removals are the PAID product. Audited 2026-08-20: 432,084 of 437,102
+# pending rows (99%) belonged to users with no plan or an expired one —
+# free signups and churn — because dashboard_bootstrap creates the full
+# kind=1 task set for every account and selection never checked payment.
+# The pipeline spent its browsers and the 50/day CCPA email budget on
+# people who never paid while the 66 paying customers waited: the real
+# backlog is ~5,000 rows, not 436,000. Scans (kind=0) are intentionally
+# NOT gated — they power the "found on N sites" report that convinces a
+# visitor to pay. Rows are left untouched: expire → they pause, renew →
+# they resume, no data migration involved.
+REMOVAL_PAID_USERS_ONLY = _get_env_bool("REMOVAL_PAID_USERS_ONLY", True)
 
 UPLOAD_TIMEOUT_SECONDS = _get_env_float("UPLOAD_TIMEOUT_SECONDS", 30.0)
 LOOP_IDLE_SLEEP_SECONDS = _get_env_float("LOOP_IDLE_SLEEP_SECONDS", 5.0)
@@ -469,6 +496,7 @@ def get_pending_removal(conn, exclude_domains=()):
                    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id) AS rn
             FROM results
             WHERE step = 0 AND kind = 1 AND planable = 1 {exclude_clause}
+              {paid_clause}
         ) ranked
         LEFT JOIN users u ON u.id = ranked.user_id
         WHERE ranked.rn <= 10
@@ -481,6 +509,14 @@ def get_pending_removal(conn, exclude_domains=()):
     """.format(exclude_clause=(
         "AND target_domain NOT IN (" + ",".join(["%s"] * len(exclude_domains)) + ")"
         if exclude_domains else ""
+    ), paid_clause=(
+        # Must live INSIDE the ranked subquery: filtering after ROW_NUMBER()
+        # would let unpaid rows consume the rn<=10 fairness slots. Mirrors
+        # pd_user_has_valid_plan() on the PHP side (plan_id set + unexpired).
+        """AND EXISTS (SELECT 1 FROM users pu WHERE pu.id = results.user_id
+                   AND pu.plan_id IS NOT NULL AND pu.plan_id <> 0
+                   AND pu.plan_end IS NOT NULL AND pu.plan_end > NOW())"""
+        if REMOVAL_PAID_USERS_ONLY else ""
     )), tuple(exclude_domains))
 
 
@@ -754,6 +790,13 @@ def _requeue_recovered_pii():
                 "    WHERE r2.kind = 1 AND r2.step = 5 "
                 "      AND TRIM(COALESCE(u.firstname, '')) <> '' "
                 "      AND TRIM(COALESCE(u.lastname, '')) <> '' "
+                # same gate as selection: only unpark rows the picker will
+                # actually use, so the bounded requeue budget isn't spent
+                # on rows for unpaid accounts that would sit at step=0.
+                + ("      AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
+                   "      AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
+                   if REMOVAL_PAID_USERS_ONLY else "")
+                +
                 "      AND CAST(COALESCE(r2.data->>'$.pii_requeues', 0) "
                 "               AS UNSIGNED) < %s "
                 "    LIMIT %s) x)",
