@@ -148,7 +148,7 @@ def syncme(dataRow, website_name, in_user_email, run_mode) :
         print(audio_source)
 
         response = requests.get(audio_source)
-        with open("__downloaded.mp3", "wb") as file:
+        with open(("__downloaded_%d.mp3" % __import__("threading").get_ident()), "wb") as file:
             file.write(response.content)
 
         sleep(1)
@@ -157,7 +157,7 @@ def syncme(dataRow, website_name, in_user_email, run_mode) :
         solver = TwoCaptcha(apiKey)
         print("Captcha is solving...")
         try :
-            result = solver.audio("__downloaded.mp3", lang="en")
+            result = solver.audio(("__downloaded_%d.mp3" % __import__("threading").get_ident()), lang="en")
             print("Captcha is solved.")
             print(result["code"])
             Code = result["code"]

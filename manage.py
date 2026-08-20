@@ -41,6 +41,7 @@ import time
 import json
 import logging
 import threading
+import contextlib
 import concurrent.futures
 from collections import OrderedDict
 
@@ -83,6 +84,63 @@ logging.basicConfig(
 logging.getLogger("socketio").setLevel(logging.ERROR)
 logging.getLogger("engineio").setLevel(logging.ERROR)
 log = logging.getLogger("pd.removal")
+
+
+# ----- mirror print()/traceback output into the log file --------------------
+#
+# The 400 broker scripts narrate via print(), and __removal.py writes
+# tracebacks with traceback.print_exc() — none of which goes through logging,
+# so the log file was a fraction of what the console showed. This tee wraps
+# sys.stdout/sys.stderr: every write still reaches the real console
+# unchanged, and each completed line is ALSO handed to a file-only logger.
+#
+# No recursion: the console StreamHandler above captured the ORIGINAL
+# sys.stderr object before this swap, and the "pd.console" logger propagates
+# to nothing — it owns only the file handler.
+_file_only = logging.getLogger("pd.console")
+_file_only.propagate = False
+_file_only.setLevel(logging.INFO)
+for _h in _log_handlers[1:]:          # the RotatingFileHandler(s), if any
+    _file_only.addHandler(_h)
+
+
+class _TeeToLog:
+    def __init__(self, orig, tag):
+        self._orig = orig
+        self._tag = tag
+        self._buf = ""
+        self._lock = threading.Lock()
+
+    def write(self, text):
+        try:
+            self._orig.write(text)
+        except Exception:
+            pass
+        if not _file_only.handlers:
+            return
+        with self._lock:
+            self._buf += text
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                if line.strip():
+                    try:
+                        _file_only.info("[%s] %s", self._tag, line.rstrip())
+                    except Exception:
+                        pass
+
+    def flush(self):
+        try:
+            self._orig.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):      # isatty, encoding, fileno, ...
+        return getattr(self._orig, name)
+
+
+if len(_log_handlers) > 1:            # only when file logging is up
+    sys.stdout = _TeeToLog(sys.stdout, "out")
+    sys.stderr = _TeeToLog(sys.stderr, "err")
 
 
 # ----- env loading ----------------------------------------------------------
@@ -156,8 +214,8 @@ REMOVAL_INTERVAL_DICT_MAXSIZE = _get_env_int("REMOVAL_INTERVAL_DICT_MAXSIZE", 10
 # How many removals run at once. Safe because every broker script builds its
 # browser via ChromiumOptions().auto_port() (unique debug port + temp profile
 # per instance), so parallel Chromes cannot collide. The two brokers that
-# drive the ACTUAL desktop mouse/keyboard (pyautogui) are serialised through
-# _desktop_lock below — those cannot overlap with each other.
+# drive the ACTUAL desktop mouse/keyboard (pyautogui) run exclusively via
+# _desktop_gate below — nothing else may open windows while they type.
 # 12GB box: 3 removal browsers + the scan loops' browsers fits comfortably.
 REMOVAL_CONCURRENCY = max(1, _get_env_int("REMOVAL_CONCURRENCY", 3))
 
@@ -572,11 +630,12 @@ def process_groups_google_scan():
                     "target_domain": row["target_domain"], "kind": 3,
                 }, room=str(row["user_id"]))
                 try:
-                    path = google_scan_dispatch(
-                        socketio, row["target_domain"], row["id"], row["user_id"],
-                        row["email"], row["firstname"], row["lastname"],
-                        row["city"], row["zip"], row["state"], row["age"],
-                    )
+                    with _desktop_gate.browser():
+                        path = google_scan_dispatch(
+                            socketio, row["target_domain"], row["id"], row["user_id"],
+                            row["email"], row["firstname"], row["lastname"],
+                            row["city"], row["zip"], row["state"], row["age"],
+                        )
                     _set_step(conn, row["id"], 2)
                     socketio.emit("complete", {
                         "id": row["id"], "user_id": row["user_id"],
@@ -633,11 +692,12 @@ def process_groups():
                         }, room=str(row["user_id"]))
 
                         try:
-                            path = scan_dispatch(
-                                socketio, row["target_domain"], row["id"], row["user_id"],
-                                row["email"], row["firstname"], row["lastname"],
-                                row["city"], row["zip"], row["state"], row["age"],
-                            )
+                            with _desktop_gate.browser():
+                                path = scan_dispatch(
+                                    socketio, row["target_domain"], row["id"], row["user_id"],
+                                    row["email"], row["firstname"], row["lastname"],
+                                    row["city"], row["zip"], row["state"], row["age"],
+                                )
                             if path == "Not Found":
                                 _set_step(conn, row["id"], 3, "not_found")
                             else:
@@ -835,11 +895,62 @@ def maintenance_loop():
 
 
 # The only two brokers that drive the real desktop mouse/keyboard via
-# pyautogui. Two of these at once would fight over the single cursor, so they
-# take this lock. Every other broker is pure DrissionPage on its own debug
-# port and needs no serialisation.
+# pyautogui. Every other broker is pure DrissionPage: it talks to its own
+# Chrome over a private debug port, so it neither needs window focus nor can
+# it type into the wrong window. pyautogui is different — it types into
+# whatever window has FOCUS. A plain mutex between the two pyautogui brokers
+# is not enough: while one is typing a customer's details, any OTHER worker
+# (or the scan loops) opening a new Chrome window steals focus on Windows,
+# and the keystrokes land in that unrelated form. That is how "wrong data
+# submitted" actually happens with parallel browsers.
+#
+# So desktop brokers run EXCLUSIVELY: a reader/writer gate where every
+# browser-launching job holds the reader side, and a pyautogui broker (the
+# writer) first blocks new jobs, then waits for in-flight ones to drain,
+# runs alone on a quiet desktop, and everything resumes afterwards. Costs a
+# few minutes of parallelism on the rare occasions these two brokers come up.
 _DESKTOP_AUTOMATION_BROKERS = {"allantgroupcom", "digitalsegmentcom"}
-_desktop_lock = threading.Lock()
+
+
+class _DesktopGate:
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._readers = 0
+        self._writers_waiting = 0
+        self._writer_active = False
+
+    @contextlib.contextmanager
+    def browser(self):
+        """Any job that may open/drive a browser window."""
+        with self._cv:
+            while self._writers_waiting or self._writer_active:
+                self._cv.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._cv:
+                self._readers -= 1
+                self._cv.notify_all()
+
+    @contextlib.contextmanager
+    def desktop(self):
+        """A pyautogui job that needs the whole desktop to itself."""
+        with self._cv:
+            self._writers_waiting += 1
+            while self._readers or self._writer_active:
+                self._cv.wait()
+            self._writers_waiting -= 1
+            self._writer_active = True
+        try:
+            yield
+        finally:
+            with self._cv:
+                self._writer_active = False
+                self._cv.notify_all()
+
+
+_desktop_gate = _DesktopGate()
 
 # Users with a removal currently running, so two rows for the same user are
 # never processed at the same time (keeps per-user pacing meaningful and
@@ -893,9 +1004,8 @@ def _process_removal_row(row):
 
         needs_desktop = row["target_domain"] in _DESKTOP_AUTOMATION_BROKERS
         try:
-            if needs_desktop:
-                _desktop_lock.acquire()
-            try:
+            gate = _desktop_gate.desktop() if needs_desktop else _desktop_gate.browser()
+            with gate:
                 path = removal_dispatch(
                     socketio, row["target_domain"], row["site_url"],
                     row["id"], row["user_id"],
@@ -905,9 +1015,6 @@ def _process_removal_row(row):
                     row["birth_day"], row["birth_month"], row["birth_year"],
                     row["area_code"], row["street"], row["county"],
                 )
-            finally:
-                if needs_desktop:
-                    _desktop_lock.release()
             _set_step(conn, row["id"], 2)
             socketio.emit("complete", {
                 "id": row["id"], "user_id": row["user_id"],
@@ -1051,12 +1158,13 @@ def process_groups_face_removal():
                             "target_domain": row["target_domain"], "kind": 4,
                         }, room=str(row["user_id"]))
                         try:
-                            path = face_removal(
-                                socketio, row["target_domain"], row["id"], row["user_id"],
-                                row.get("email") or "",
-                                row.get("face_filename") or "",
-                                run_mode="non-headless",
-                            )
+                            with _desktop_gate.browser():
+                                path = face_removal(
+                                    socketio, row["target_domain"], row["id"], row["user_id"],
+                                    row.get("email") or "",
+                                    row.get("face_filename") or "",
+                                    run_mode="non-headless",
+                                )
                             _set_step(conn, row["id"], 2)
                             socketio.emit("complete", {
                                 "id": row["id"], "user_id": row["user_id"],

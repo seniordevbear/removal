@@ -106,12 +106,12 @@ def findpeoplesearchcom(dataRow, website_name, in_user_email, run_mode) :
         #Wait until captcha is solved
         form_container = page.ele("tag:form@@id=contact_form")
         Image = form_container.ele("tag:img")
-        Image.get_screenshot("captcha.png")
+        Image.get_screenshot(("captcha_%d.png" % __import__("threading").get_ident()))
 
         # Captcha solver part
         print('Captcha is solving....')
         try:
-          result = solver.normal('captcha.png')
+          result = solver.normal(("captcha_%d.png" % __import__("threading").get_ident()))
         #   print(result)
           Code=result['code']
           print('Captcha is solve. Code:',Code)

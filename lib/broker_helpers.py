@@ -457,20 +457,29 @@ def _state_full_name(raw):
 
 
 def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
-    """Generic opt-out submission for californiaarrests.org / nyarrests.org /
-    etc. AND alabamacourtrecords.us etc. All sites in this family render the
-    same privacy-request portal at /request-portal.
+    """Generic opt-out for the arrests.org / courtrecords.us site family
+    (53 broker scripts delegate here).
 
-    Args:
-        broker_name: bare filename without .py, e.g. "californiaarrestsorg"
-        dataRow: dict built by __removal._build_data_row
-        run_mode: "headless" or "non-headless"
+    Surveyed 2026-08-20 — the family no longer shares one portal:
 
-    Returns the screenshot path on success. Raises on failure (caller in
-    manage.py catches and marks step=3, then retries on next sweep)."""
+      * *courtrecords.us  ->  /optout/           InfoPay platform. Fields are
+        Model[fname]/[lname]/[state]/[city]; no email/address; no radios.
+      * *arrests.org      ->  /privacy-request-portal   WPForms. CHECKBOXES
+        (not radios) for "myself" + "Delete", name fields contain "first"/
+        "last", plus email/address/city/state/zip, guarded by Cloudflare
+        Turnstile.
+      * a few (arrestwarrant.org) have NO portal at all -> we raise, the row
+        is recorded and bounded-retried, and the domain shows up in the
+        failure report instead of silently looping.
+
+    The old code assumed one URL (/request-portal) and radio buttons; when
+    the family split it 404'd everywhere and every attempt raised
+    "no candidate selector matched".
+
+    Returns the screenshot path on success. Raises on failure."""
     from time import sleep
     import random
-    url = _broker_to_request_portal_url(broker_name)
+    base = _broker_to_request_portal_url(broker_name).rsplit("/request-portal", 1)[0]
     name_full = (dataRow.get("Name") or "").strip()
     parts = name_full.split()
     first = parts[0] if parts else ""
@@ -481,116 +490,160 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
     state = _state_full_name(dataRow.get("State") or "")
     zipc = (dataRow.get("Zipcode") or "").strip()
 
-    page = None
     screenshot_path = None
+    page = None
     try:
-        # run_mode is the broker-facing "headless"/"non-headless" string;
-        # safe_chromium_for_broker takes a boolean. (It once accepted
-        # run_mode/screenshot_subdir kwargs; the signature changed and this
-        # call was not updated — every arrests.org-family removal then died
-        # with TypeError before the browser even opened. screenshot_subdir
-        # is gone entirely: screenshot_step() names files by broker itself.)
         with safe_chromium_for_broker(broker_name,
                                       headless=(run_mode == "headless")) as page:
-            log_step(broker_name, "GET " + url)
-            page.get(url)
-            sleep(2.5)
-            try:
-                dismiss_common_consents(page, broker_name)
-            except Exception:
-                pass  # not fatal
 
-            # CloudFlare interstitial -- give it a moment
-            if "challenge" in (page.url or "") or "Just a moment" in (page.html or ""):
-                sleep(8)
+            def _has_form():
+                for sel in ("css:input[name*='[fname]']",
+                            "css:input[name*='first' i]",
+                            "css:.wpforms-field-name-first"):
+                    try:
+                        if page.ele(sel, timeout=1.5):
+                            return True
+                    except Exception:
+                        pass
+                return False
 
-            # Click "I am submitting this request for myself"
-            try:
-                self_radio = find_input(
-                    page,
-                    "input[type=radio][value*=self i]",
-                    "input[type=radio][value*=myself i]",
-                    "xpath://label[contains(translate(., 'MYSELF', 'myself'), 'myself')]/input[@type='radio']",
-                    "xpath://label[contains(translate(., 'MYSELF', 'myself'), 'myself')]/preceding-sibling::input[@type='radio']",
-                    "xpath://input[@type='radio'][1]",
-                    timeout=8.0,
-                )
-                self_radio.click()
-                sleep(0.4)
-            except Exception as e:
-                log_step(broker_name, "self radio not found: " + str(e), logging.WARNING)
+            found = False
+            for path in ("/privacy-request-portal", "/optout/", "/request-portal"):
+                url = base + path
+                log_step(broker_name, "GET " + url)
+                page.get(url)
+                sleep(2.5)
+                if "challenge" in (page.url or "") or "Just a moment" in (page.html or ""):
+                    sleep(8)
+                try:
+                    dismiss_common_consents(page, broker_name)
+                except Exception:
+                    pass
+                if _has_form():
+                    found = True
+                    break
+            if not found:
+                screenshot_path = screenshot_step(page, broker_name, "no_form")
+                raise RuntimeError(
+                    broker_name + ": no opt-out form at any known path "
+                    "(/privacy-request-portal, /optout/, /request-portal) — "
+                    "site layout changed, script needs a survey")
 
-            # Click "Delete my personal information"
-            try:
-                delete_radio = find_input(
-                    page,
-                    "input[type=radio][value*=delete i]",
-                    "xpath://label[contains(translate(., 'DELETE', 'delete'), 'delete')]/input[@type='radio']",
-                    "xpath://label[contains(translate(., 'DELETE', 'delete'), 'delete')]/preceding-sibling::input[@type='radio']",
-                    timeout=8.0,
-                )
-                delete_radio.click()
-                sleep(0.4)
-            except Exception as e:
-                log_step(broker_name, "delete radio not found: " + str(e), logging.WARNING)
+            # -- consent toggles: WPForms uses checkboxes, older layouts used
+            #    radios. Try both input types for each concept; missing is a
+            #    warning, not fatal (InfoPay has neither).
+            for concept, needles in (("myself", ("self", "myself")),
+                                     ("delete", ("delete",))):
+                clicked = False
+                for typ in ("checkbox", "radio"):
+                    for needle in needles:
+                        try:
+                            el = page.ele(
+                                "css:input[type=%s][value*='%s' i]" % (typ, needle),
+                                timeout=1.5)
+                            if el:
+                                el.click()
+                                sleep(0.3)
+                                clicked = True
+                                break
+                        except Exception:
+                            pass
+                    if clicked:
+                        break
+                if not clicked:
+                    log_step(broker_name, concept + " toggle not present",
+                             logging.WARNING)
 
             def _fill(label_aliases, value, required=False):
                 if not value:
                     if required:
-                        raise RuntimeError("required field " + repr(label_aliases[0]) + " has no value")
+                        raise RuntimeError(
+                            "required field " + repr(label_aliases[0]) +
+                            " has no value for this user")
                     return
                 cands = []
                 for alias in label_aliases:
-                    cands.append("input[id*=" + alias + " i]")
-                    cands.append("input[name*=" + alias + " i]")
-                    cands.append("input[placeholder*=" + alias + " i]")
-                el = find_input(page, *cands, timeout=4.0)
+                    cands.append("css:input[id*='%s' i]" % alias)
+                    cands.append("css:input[name*='%s' i]" % alias)
+                    cands.append("css:input[placeholder*='%s' i]" % alias)
+                try:
+                    el = find_input(page, *cands, timeout=4.0)
+                except ValueError:
+                    if required:
+                        raise
+                    log_step(broker_name,
+                             "field %s not on this form, skipped" % label_aliases[0],
+                             logging.INFO)
+                    return
                 el.click()
                 sleep(random.uniform(0.05, 0.12))
                 el.input(value)
                 sleep(0.2)
 
-            _fill(["first"], first, required=True)
-            _fill(["last"], last, required=True)
-            _fill(["email"], email, required=True)
-            _fill(["addressLine1", "address1", "address-1", "address"], address_line_1, required=True)
-            _fill(["city"], city, required=False)
-            _fill(["zip", "postal"], zipc, required=False)
+            # name fields exist on every shape (fname on InfoPay, first on
+            # WPForms) — these two are the only hard requirements.
+            _fill(["first", "fname"], first, required=True)
+            _fill(["last", "lname"], last, required=True)
+            # everything else is best-effort: present on WPForms, absent on
+            # InfoPay, and absence must not kill the run.
+            _fill(["email"], email)
+            _fill(["addressLine1", "address1", "address-1", "address"], address_line_1)
+            _fill(["city"], city)
+            _fill(["zip", "postal"], zipc)
 
             if state:
                 try:
-                    safe_select(page, "select[id*=state i], select[name*=state i]", state, timeout=4.0)
+                    safe_select(page,
+                                "css:select[id*='state' i], select[name*='state' i]",
+                                state, timeout=4.0)
                 except Exception as e:
-                    log_step(broker_name, "state select failed: " + str(e), logging.WARNING)
+                    log_step(broker_name, "state select failed: " + str(e),
+                             logging.WARNING)
 
-            # Optional details textarea
+            # Optional details textarea (WPForms request-details box)
             try:
-                details = find_input(
-                    page,
-                    "textarea[id*=detail i]",
-                    "textarea[name*=detail i]",
-                    "textarea",
-                    timeout=2.5,
-                )
-                details.input("Please delete all of my personal information from your records.")
+                details = page.ele("tag:textarea", timeout=2.0)
+                if details:
+                    details.input("Please delete all of my personal information "
+                                  "from your records.")
             except Exception:
                 pass
+
+            # -- Cloudflare Turnstile (WPForms portals). Solve via 2captcha
+            #    and inject the token; without it the submit is rejected.
+            try:
+                ts = page.ele("css:.cf-turnstile[data-sitekey]", timeout=1.5)
+            except Exception:
+                ts = None
+            if ts:
+                sitekey = ts.attr("data-sitekey")
+                log_step(broker_name, "solving turnstile sitekey=" + str(sitekey))
+                try:
+                    from lib.captcha import get_solver
+                    import json as _json
+                    token = get_solver().turnstile(sitekey=sitekey, url=page.url)["code"]
+                    # embed via JSON: DrissionPage run_js has no Selenium-style
+                    # arguments[] contract, and json.dumps gives safe quoting.
+                    page.run_js(
+                        "var i=document.querySelector("
+                        "'input[name=\"cf-turnstile-response\"]');"
+                        "if(i){i.value=" + _json.dumps(token) + ";}")
+                except Exception as e:
+                    log_step(broker_name, "turnstile solve failed: " + str(e),
+                             logging.ERROR)
+                    raise
 
             sleep(0.5)
             screenshot_path = screenshot_step(page, broker_name, "before_submit")
 
-            try:
-                submit_btn = find_input(
-                    page,
-                    "button[type=submit]",
-                    "input[type=submit]",
-                    "xpath://button[contains(translate(., 'SUBMIT', 'submit'), 'submit')]",
-                    timeout=6.0,
-                )
-                submit_btn.click()
-            except Exception as e:
-                log_step(broker_name, "submit btn not found: " + str(e), logging.ERROR)
-                raise
+            submit_btn = find_input(
+                page,
+                "css:button[type=submit]",
+                "css:input[type=submit]",
+                "xpath://button[contains(translate(., 'SUBMIT', 'submit'), 'submit')]",
+                timeout=6.0,
+            )
+            submit_btn.click()
 
             sleep(5)
             screenshot_path = screenshot_step(page, broker_name, "after_submit") or screenshot_path

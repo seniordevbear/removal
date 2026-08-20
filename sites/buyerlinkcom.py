@@ -102,12 +102,12 @@ def fill_input_data(page, dataRow) :
 
     while True :
         Image = page.ele("tag:img@@class=BDC_CaptchaImage")
-        Image.get_screenshot("captcha.png")
+        Image.get_screenshot(("captcha_%d.png" % __import__("threading").get_ident()))
 
         # Captcha solver part
         print('Captcha is solving....')
         try:
-            result = solver.normal('captcha.png')
+            result = solver.normal(("captcha_%d.png" % __import__("threading").get_ident()))
         #   print(result)
             Code=result['code']
             print('Captcha is solve. Code:',Code)

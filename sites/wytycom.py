@@ -150,11 +150,11 @@ def wytycom(dataRow, website_name, in_user_email, run_mode) :
 
 
         Image = page.ele("tag:img@@id=content_ImageCaptcha")
-        Image.get_screenshot("captcha.png")
+        Image.get_screenshot(("captcha_%d.png" % __import__("threading").get_ident()))
 
         print('ImageCaptcha is solving....')
         try:
-            result = solver.normal('captcha.png')
+            result = solver.normal(("captcha_%d.png" % __import__("threading").get_ident()))
             #   print(result)
             Code1=result['code']
             print('Captcha is solve. Code:',Code1)
