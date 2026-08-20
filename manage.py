@@ -56,7 +56,7 @@ from __removal import (
     ModuleMissing as RemovalModuleMissing,
     IncompletePII,
 )
-from lib.broker_helpers import CCPADailyLimitReached
+from lib.broker_helpers import CCPADailyLimitReached, ccpa_global_quota_reached
 from __face_removal import face_removal
 from lib.automation_delay import enable_automation_delays
 
@@ -138,6 +138,14 @@ if REMOVAL_MIN_INTERVAL_SECONDS <= 0:
 # of room without growing unbounded over weeks of uptime.
 REMOVAL_INTERVAL_DICT_MAXSIZE = _get_env_int("REMOVAL_INTERVAL_DICT_MAXSIZE", 10000)
 
+# How many removals run at once. Safe because every broker script builds its
+# browser via ChromiumOptions().auto_port() (unique debug port + temp profile
+# per instance), so parallel Chromes cannot collide. The two brokers that
+# drive the ACTUAL desktop mouse/keyboard (pyautogui) are serialised through
+# _desktop_lock below — those cannot overlap with each other.
+# 12GB box: 3 removal browsers + the scan loops' browsers fits comfortably.
+REMOVAL_CONCURRENCY = max(1, _get_env_int("REMOVAL_CONCURRENCY", 3))
+
 UPLOAD_TIMEOUT_SECONDS = _get_env_float("UPLOAD_TIMEOUT_SECONDS", 30.0)
 LOOP_IDLE_SLEEP_SECONDS = _get_env_float("LOOP_IDLE_SLEEP_SECONDS", 5.0)
 PD_UPLOAD_SECRET = os.getenv("PD_UPLOAD_SECRET", "").strip()
@@ -184,9 +192,19 @@ db_config = {
     "password": DB_PASSWORD,
     "database": DB_NAME,
     "port": DB_PORT,
-    "ssl_ca": DB_SSL_CA,
-    "ssl_verify_cert": DB_SSL_VERIFY_CERT,
+    # Force the pure-Python driver. mysql-connector-python 9.x defaults to a
+    # compiled C extension whose TLS stack hangs indefinitely against the
+    # managed database — it ignores connection_timeout, so it never even
+    # errors. The pure-Python path connects normally.
+    "use_pure": True,
 }
+# Only pass SSL options when a CA file is actually configured. Passing
+# ssl_ca="" made mysql-connector-python 9.x treat the empty string as a real
+# CA path, so the TLS handshake hung forever against the managed database.
+# (The old 2.2.9 connector silently ignored it.)
+if DB_SSL_CA:
+    db_config["ssl_ca"] = DB_SSL_CA
+    db_config["ssl_verify_cert"] = DB_SSL_VERIFY_CERT
 
 
 # ----- Flask + SocketIO -----------------------------------------------------
@@ -255,11 +273,49 @@ last_removal_processed_at = _BoundedDict(REMOVAL_INTERVAL_DICT_MAXSIZE)
 
 # ----- shared DB helper -----------------------------------------------------
 
+# Failure reasons are persisted into the existing `results.data` JSON column
+# under a namespaced key rather than a new column, so no schema migration is
+# needed against the shared production database. Query them with e.g.
+#   SELECT target_domain, data->>'$.pipeline_last_error' AS err, COUNT(*)
+#   FROM results WHERE kind=1 AND step=3 GROUP BY 1,2 ORDER BY 3 DESC;
+# Previously the reason was only logged, so "why did 10,106 removals fail?"
+# was unanswerable without grepping weeks of rotated service logs.
+_ERR_KEY = "$.pipeline_last_error"
+_ERR_AT_KEY = "$.pipeline_last_error_at"
+
+
 def _set_step(conn, row_id, new_step, reason=None):
-    """Single source of truth for step transitions. Parameterized."""
+    """Single source of truth for step transitions. Parameterized.
+
+    When `reason` is given it is recorded on the row; when it is absent (a
+    success or a requeue) any previous reason is cleared, so a row's stored
+    error always describes its current state rather than a stale past one.
+    """
     cur = conn.cursor()
     try:
-        cur.execute("UPDATE results SET step = %s WHERE id = %s", (new_step, row_id))
+        if reason:
+            sql = (
+                "UPDATE results SET step = %s, data = JSON_SET("
+                "COALESCE(data, '{}'), '" + _ERR_KEY + "', %s, "
+                "'" + _ERR_AT_KEY + "', NOW()) WHERE id = %s"
+            )
+            params = (new_step, str(reason)[:255], row_id)
+        else:
+            sql = (
+                "UPDATE results SET step = %s, data = JSON_REMOVE("
+                "data, '" + _ERR_KEY + "', '" + _ERR_AT_KEY + "') WHERE id = %s"
+            )
+            params = (new_step, row_id)
+        try:
+            cur.execute(sql, params)
+        except Exception:
+            # Never lose a step transition because the JSON write failed
+            # (old MySQL, malformed pre-existing JSON, column type change).
+            log.exception("step %s id=%s: reason write failed, "
+                          "falling back to plain update", new_step, row_id)
+            conn.rollback()
+            cur.execute("UPDATE results SET step = %s WHERE id = %s",
+                        (new_step, row_id))
         conn.commit()
         if reason:
             log.info("step %s -> id=%s reason=%s", new_step, row_id, reason)
@@ -269,14 +325,34 @@ def _set_step(conn, row_id, new_step, reason=None):
 
 # ----- upload helper --------------------------------------------------------
 
-def upload_file_to_server(url, file_path):
+def upload_file_to_server(url, file_path, attempts=3):
     """POST `file_path` as multipart to `url`. Returns parsed JSON on
     Content-Type: application/json, else returns the raw text on success,
     None on failure. Has a real timeout and surfaces failures via logging
-    instead of swallowing them."""
+    instead of swallowing them.
+
+    Retries transient failures (network blips, 5xx) up to `attempts` times
+    with a short backoff — evidence is the product here, so a single hiccup
+    must not silently discard proof of a completed removal."""
     if not file_path or not os.path.exists(file_path):
         log.warning("upload skipped (file missing): %s", file_path)
         return None
+    for attempt in range(1, attempts + 1):
+        result = _upload_once(url, file_path)
+        if result is _PERMANENT_FAILURE:
+            return None  # 4xx: wrong secret/format/IP — retrying cannot help
+        if result is not None:
+            return result
+        if attempt < attempts:
+            log.warning("upload attempt %d/%d failed, retrying: %s", attempt, attempts, file_path)
+            time.sleep(5 * attempt)
+    return None
+
+
+_PERMANENT_FAILURE = object()  # sentinel: do-not-retry upload outcome
+
+
+def _upload_once(url, file_path):
     try:
         headers = {}
         if PD_UPLOAD_SECRET:
@@ -289,7 +365,9 @@ def upload_file_to_server(url, file_path):
             resp = requests.post(url, files=files, headers=headers, timeout=UPLOAD_TIMEOUT_SECONDS)
         if not resp.ok:
             log.warning("upload non-2xx %s -> %s: %s", file_path, resp.status_code, resp.text[:200])
-            return None
+            # 4xx = permanent (bad secret, blocked IP, rejected format):
+            # retrying cannot change the outcome. 5xx/timeouts are transient.
+            return _PERMANENT_FAILURE if 400 <= resp.status_code < 500 else None
         ctype = resp.headers.get("content-type", "")
         if "application/json" in ctype:
             try:
@@ -330,7 +408,34 @@ def get_pending_scan(conn):
     """)
 
 
-def get_pending_removal(conn):
+_CCPA_DOMAINS_CACHE = None
+
+def _ccpa_email_domains():
+    """Domains whose broker script is a CCPA email opt-out (subject to the
+    global daily email cap). Discovered once by scanning sites/*.py for the
+    run_ccpa_email_optout call, so no per-script registry has to be kept."""
+    global _CCPA_DOMAINS_CACHE
+    if _CCPA_DOMAINS_CACHE is None:
+        found = set()
+        sites_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sites")
+        try:
+            for fname in os.listdir(sites_dir):
+                if not fname.endswith(".py"):
+                    continue
+                try:
+                    with open(os.path.join(sites_dir, fname), "r", encoding="utf-8", errors="ignore") as f:
+                        if "run_ccpa_email_optout" in f.read():
+                            found.add(fname[:-3])
+                except OSError:
+                    continue
+        except OSError:
+            log.exception("could not scan sites/ for CCPA email brokers")
+        _CCPA_DOMAINS_CACHE = found
+        log.info("ccpa email brokers discovered: %d", len(found))
+    return _CCPA_DOMAINS_CACHE
+
+
+def get_pending_removal(conn, exclude_domains=()):
     # FAIRNESS FIX 2026-05-28: previous version had
     #   ORDER BY user_id ASC LIMIT 1000
     # which monopolized the first ~5 user_ids (they had 1164+ rows
@@ -363,7 +468,7 @@ def get_pending_removal(conn):
             SELECT *,
                    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id) AS rn
             FROM results
-            WHERE step = 0 AND kind = 1 AND planable = 1
+            WHERE step = 0 AND kind = 1 AND planable = 1 {exclude_clause}
         ) ranked
         LEFT JOIN users u ON u.id = ranked.user_id
         WHERE ranked.rn <= 10
@@ -373,7 +478,10 @@ def get_pending_removal(conn):
         -- COALESCE so users without planedAt sort to the end, not crash.
         ORDER BY COALESCE(u.planedAt, '1970-01-01') DESC, ranked.user_id ASC, ranked.id ASC
         LIMIT 1000
-    """)
+    """.format(exclude_clause=(
+        "AND target_domain NOT IN (" + ",".join(["%s"] * len(exclude_domains)) + ")"
+        if exclude_domains else ""
+    )), tuple(exclude_domains))
 
 
 def get_pending_face_removal(conn):
@@ -525,70 +633,352 @@ def process_groups():
         time.sleep(LOOP_IDLE_SLEEP_SECONDS)
 
 
+# ----- maintenance: stale-claim recovery + chrome reaper ---------------------
+
+MAINTENANCE_INTERVAL_SECONDS = _get_env_float("MAINTENANCE_INTERVAL_SECONDS", 3600.0)
+STALE_CLAIM_HOURS = _get_env_int("STALE_CLAIM_HOURS", 2)
+CHROME_REAPER_ENABLED = _get_env_bool("CHROME_REAPER_ENABLED", True)
+CHROME_MAX_AGE_MINUTES = _get_env_int("CHROME_MAX_AGE_MINUTES", 180)
+
+
+def _recover_stale_claims():
+    """Reset rows stuck at step=1 (claimed but never finished).
+
+    A crash or power loss mid-task leaves claimed rows orphaned forever —
+    the old --reset-claims flag existed for exactly this, but had to be run
+    by hand and never was (16 rows were found stuck from previous crashes).
+    No legitimate task runs anywhere near STALE_CLAIM_HOURS, and `results`
+    bumps updated_at on every step change, so age == staleness.
+    Only kinds 1 and 4 use the claim mechanism.
+    """
+    conn = None
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE results SET step = 0 "
+                "WHERE step = 1 AND kind IN (1, 4) "
+                "AND updated_at < NOW() - INTERVAL %s HOUR",
+                (STALE_CLAIM_HOURS,),
+            )
+            conn.commit()
+            if cur.rowcount:
+                log.warning("stale-claim recovery: requeued %d orphaned step=1 rows", cur.rowcount)
+        finally:
+            cur.close()
+    except Exception:
+        log.exception("stale-claim recovery failed")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _reap_old_chrome():
+    """Kill chrome processes older than CHROME_MAX_AGE_MINUTES.
+
+    Most broker scripts create the page directly and only call page.quit()
+    on the happy path, so crashes leak chromium processes; over days they
+    exhaust RAM (this contributed to killing the previous server). No
+    legitimate task keeps a browser open longer than the cutoff, so anything
+    older is a leak — and killing it also frees any worker thread hung on a
+    wedged browser, which would otherwise stall its pool slot forever.
+    """
+    if not CHROME_REAPER_ENABLED:
+        return
+    try:
+        import psutil
+    except ImportError:
+        log.warning("chrome reaper: psutil not installed; skipping")
+        return
+    cutoff = time.time() - CHROME_MAX_AGE_MINUTES * 60
+    killed = 0
+    for proc in psutil.process_iter(["name", "create_time"]):
+        try:
+            name = (proc.info["name"] or "").lower()
+            if not name.startswith("chrome"):
+                continue
+            if (proc.info["create_time"] or time.time()) < cutoff:
+                proc.kill()
+                killed += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:
+            log.exception("chrome reaper: error on pid %s", getattr(proc, "pid", "?"))
+    if killed:
+        log.warning("chrome reaper: killed %d chrome processes older than %dmin",
+                    killed, CHROME_MAX_AGE_MINUTES)
+
+
+# Rows parked at step=5 (missing_pii) were never looked at again. The global
+# PII check is only "does this user have a name?", and it runs in __removal.py
+# *before* any module import or browser launch — so re-testing a parked row is
+# a string comparison, not a page load.
+#
+# Since the signup redesign moved removal details to after payment, customers
+# routinely complete their profile long after their rows were parked. At the
+# time of writing 19,078 of the 19,189 parked rows belong to customers who now
+# have a full name: real, paid-for removals that would otherwise never run.
+#
+# PII_REQUEUE_LIMIT bounds this so a row can never ping-pong between 5 and 0
+# forever; the counter lives in the same JSON column as the error reason.
+PII_REQUEUE_LIMIT = _get_env_int("PII_REQUEUE_LIMIT", 2)
+PII_REQUEUE_BATCH = _get_env_int("PII_REQUEUE_BATCH", 2000)
+
+
+def _requeue_recovered_pii():
+    """Return step=5 rows to the queue once their owner has a usable name."""
+    conn = None
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cur = conn.cursor()
+        try:
+            # MySQL forbids LIMIT on a multi-table UPDATE, and forbids a
+            # LIMIT subquery directly inside IN(...) — hence the single-table
+            # UPDATE with the join wrapped in a derived table. CAST(...) keeps
+            # the counter an integer; ->> alone yields a string and `+ 1`
+            # would coerce it to a double (2.0).
+            cur.execute(
+                "UPDATE results r "
+                "SET r.step = 0, "
+                "    r.data = JSON_SET(COALESCE(r.data, '{}'), "
+                "        '$.pii_requeues', "
+                "        CAST(COALESCE(r.data->>'$.pii_requeues', 0) "
+                "             AS UNSIGNED) + 1) "
+                "WHERE r.id IN (SELECT id FROM ("
+                "    SELECT r2.id FROM results r2 "
+                "      JOIN users u ON u.id = r2.user_id "
+                "    WHERE r2.kind = 1 AND r2.step = 5 "
+                "      AND TRIM(COALESCE(u.firstname, '')) <> '' "
+                "      AND TRIM(COALESCE(u.lastname, '')) <> '' "
+                "      AND CAST(COALESCE(r2.data->>'$.pii_requeues', 0) "
+                "               AS UNSIGNED) < %s "
+                "    LIMIT %s) x)",
+                (PII_REQUEUE_LIMIT, PII_REQUEUE_BATCH),
+            )
+            n = cur.rowcount
+            conn.commit()
+            if n:
+                log.info("pii recovery: requeued %d parked row(s) whose "
+                         "profile is now complete", n)
+        finally:
+            cur.close()
+    except Exception:
+        log.exception("pii requeue failed")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def maintenance_loop():
+    """Worker 1 (the historically reserved slot): housekeeping.
+
+    Runs stale-claim recovery immediately at startup — that is exactly when
+    orphans from the previous run exist — then both tasks every interval.
+    """
+    _recover_stale_claims()
+    _requeue_recovered_pii()
+    while True:
+        time.sleep(MAINTENANCE_INTERVAL_SECONDS)
+        _recover_stale_claims()
+        _reap_old_chrome()
+        _requeue_recovered_pii()
+
+
+# The only two brokers that drive the real desktop mouse/keyboard via
+# pyautogui. Two of these at once would fight over the single cursor, so they
+# take this lock. Every other broker is pure DrissionPage on its own debug
+# port and needs no serialisation.
+_DESKTOP_AUTOMATION_BROKERS = {"allantgroupcom", "digitalsegmentcom"}
+_desktop_lock = threading.Lock()
+
+# Users with a removal currently running, so two rows for the same user are
+# never processed at the same time (keeps per-user pacing meaningful and
+# avoids a user's own tasks racing each other).
+_inflight_users = set()
+_inflight_lock = threading.Lock()
+
+# A broker crash is NOT a result. Previously every exception went straight to
+# step=3 — the same step as "person not found on that site" — so customer
+# reports counted CAPTCHA hiccups and site redesigns as completed checks.
+# Now a crashed row is requeued (step=0) until the same DOMAIN has crashed
+# DOMAIN_CRASHES_BEFORE_GIVEUP times today; only then do we conclude the
+# broker script itself is broken and record step=3 (reason=broker_raised),
+# so a genuinely broken script still cannot loop forever.
+DOMAIN_CRASHES_BEFORE_GIVEUP = _get_env_int("DOMAIN_CRASHES_BEFORE_GIVEUP", 3)
+_domain_crashes = {"date": None, "counts": {}}
+_domain_crashes_lock = threading.Lock()
+
+
+def _note_domain_crash(domain):
+    """Count today's crashes for one broker domain; returns the new count."""
+    import datetime
+    today = datetime.date.today().isoformat()
+    with _domain_crashes_lock:
+        if _domain_crashes["date"] != today:
+            _domain_crashes["date"] = today
+            _domain_crashes["counts"] = {}
+        n = _domain_crashes["counts"].get(domain, 0) + 1
+        _domain_crashes["counts"][domain] = n
+        return n
+
+
+def _process_removal_row(row):
+    """Run ONE removal end-to-end on its own DB connection.
+
+    mysql-connector connections are not thread-safe, so each worker opens a
+    short-lived connection for its claim/step writes rather than sharing the
+    tick's connection.
+    """
+    user_id_str = str(row["user_id"])
+    conn = None
+    try:
+        conn = mysql.connector.connect(**db_config)
+        if not _claim_row(conn, row["id"], kind=1, require_planable=True):
+            return
+
+        socketio.emit("progress", {
+            "id": row["id"], "user_id": row["user_id"],
+            "target_domain": row["target_domain"], "kind": 1,
+        }, room=str(row["user_id"]))
+
+        needs_desktop = row["target_domain"] in _DESKTOP_AUTOMATION_BROKERS
+        try:
+            if needs_desktop:
+                _desktop_lock.acquire()
+            try:
+                path = removal_dispatch(
+                    socketio, row["target_domain"], row["site_url"],
+                    row["id"], row["user_id"],
+                    row["email"], row["firstname"], row["lastname"],
+                    row["city"], row["zip"], row["state"], row["age"],
+                    row["address"], row["phone"],
+                    row["birth_day"], row["birth_month"], row["birth_year"],
+                    row["area_code"], row["street"], row["county"],
+                )
+            finally:
+                if needs_desktop:
+                    _desktop_lock.release()
+            _set_step(conn, row["id"], 2)
+            socketio.emit("complete", {
+                "id": row["id"], "user_id": row["user_id"],
+                "target_domain": row["target_domain"], "kind": 1,
+            }, room=str(row["user_id"]))
+            if path and os.path.exists(path):
+                upload_file_to_server(
+                    REMOVAL_UPLOAD_URL_TEMPLATE.format(
+                        domain=row["target_domain"], user_id=row["user_id"]),
+                    path,
+                )
+            else:
+                # The broker "succeeded" but produced no evidence file — the
+                # screenshot call failed and was swallowed inside the script.
+                # The removal itself was performed, so step=2 stands, but this
+                # must be loudly visible: evidence is what customer reports
+                # (and dispute defences) are built on.
+                log.warning(
+                    "removal id=%s domain=%s user=%s completed WITHOUT evidence (path=%r)",
+                    row["id"], row["target_domain"], row["user_id"], path)
+            last_removal_processed_at.set(user_id_str, time.time())
+        except (RemovalModuleMissing, NotImplementedError):
+            _set_step(conn, row["id"], 4, "module_missing")
+            # Don't update the pacing timer — a missing-module
+            # "skip" shouldn't burn this user's rate window.
+        except IncompletePII as e:
+            _set_step(conn, row["id"], 5, "missing_pii:" + ",".join(e.args[0]))
+        except CCPADailyLimitReached as e:
+            # Boundary race: quota filled between selection and dispatch.
+            # Leave at step=0; selection excludes this domain from the next
+            # tick onward, and the counter resets at midnight.
+            _set_step(conn, row["id"], 0)
+            log.info("ccpa throttle: id=" + str(row["id"]) + " " + str(e))
+        except Exception:
+            log.exception("removal row failed id=%s", row["id"])
+            crashes = _note_domain_crash(row["target_domain"])
+            if crashes < DOMAIN_CRASHES_BEFORE_GIVEUP:
+                _set_step(conn, row["id"], 0)
+                log.info("broker crash %d/%d today for %s — row id=%s requeued",
+                         crashes, DOMAIN_CRASHES_BEFORE_GIVEUP,
+                         row["target_domain"], row["id"])
+            else:
+                _set_step(conn, row["id"], 3, "broker_raised")
+            last_removal_processed_at.set(user_id_str, time.time())
+    except Exception:
+        log.exception("removal outer row error id=%s", row.get("id"))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                log.exception("conn.close failed (removal worker)")
+        with _inflight_lock:
+            _inflight_users.discard(user_id_str)
+
+
+_ccpa_exclusion_logged = [False]  # log the quota state change once, not every tick
+
+
 def process_groups_removal():
-    """Worker 2: removal loop. Includes per-user pacing throttle and atomic
-    CAS claim to avoid double-processing if we ever run multiple instances."""
+    """Worker 2: removal loop.
+
+    Selection excludes CCPA email brokers once today's global email budget is
+    spent — previously those rows were claimed, raised CCPADailyLimitReached,
+    and were reset to step=0 hundreds of times per tick, clogging each user's
+    10-row fairness window so browser-automation work never got selected.
+
+    Rows are then dispatched onto a small worker pool (REMOVAL_CONCURRENCY),
+    at most one in-flight row per user. Atomic CAS claiming is kept, so this
+    also stays safe if multiple instances ever run.
+    """
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=REMOVAL_CONCURRENCY, thread_name_prefix="removal-worker")
     while True:
         conn = None
         try:
+            exclude = ()
+            if ccpa_global_quota_reached():
+                exclude = tuple(_ccpa_email_domains())
+                if exclude and not _ccpa_exclusion_logged[0]:
+                    log.info(
+                        "ccpa quota spent — excluding %d email brokers from selection until midnight",
+                        len(exclude))
+                    _ccpa_exclusion_logged[0] = True
+            elif _ccpa_exclusion_logged[0]:
+                _ccpa_exclusion_logged[0] = False
+                log.info("ccpa quota reset — email brokers back in selection")
             conn = mysql.connector.connect(**db_config)
-            data = get_pending_removal(conn)
-            log.info("removal tick: %d rows", len(data))
-            if data:
-                for row in data:
-                    try:
-                        user_id_str = str(row["user_id"])
-                        now_ts = time.time()
-                        last_ts = last_removal_processed_at.get_value(user_id_str)
-                        if last_ts and (now_ts - last_ts) < REMOVAL_MIN_INTERVAL_SECONDS:
-                            continue
+            data = get_pending_removal(conn, exclude_domains=exclude)
+            log.info("removal tick: %d rows (concurrency=%d)", len(data), REMOVAL_CONCURRENCY)
+            conn.close()
+            conn = None
 
-                        if not _claim_row(conn, row["id"], kind=1, require_planable=True):
-                            continue
+            futures = []
+            for row in data:
+                user_id_str = str(row["user_id"])
+                now_ts = time.time()
+                last_ts = last_removal_processed_at.get_value(user_id_str)
+                if last_ts and (now_ts - last_ts) < REMOVAL_MIN_INTERVAL_SECONDS:
+                    continue
+                with _inflight_lock:
+                    if user_id_str in _inflight_users:
+                        continue
+                    _inflight_users.add(user_id_str)
+                futures.append(pool.submit(_process_removal_row, row))
 
-                        socketio.emit("progress", {
-                            "id": row["id"], "user_id": row["user_id"],
-                            "target_domain": row["target_domain"], "kind": 1,
-                        }, room=str(row["user_id"]))
-
-                        try:
-                            path = removal_dispatch(
-                                socketio, row["target_domain"], row["site_url"],
-                                row["id"], row["user_id"],
-                                row["email"], row["firstname"], row["lastname"],
-                                row["city"], row["zip"], row["state"], row["age"],
-                                row["address"], row["phone"],
-                                row["birth_day"], row["birth_month"], row["birth_year"],
-                                row["area_code"], row["street"], row["county"],
-                            )
-                            _set_step(conn, row["id"], 2)
-                            socketio.emit("complete", {
-                                "id": row["id"], "user_id": row["user_id"],
-                                "target_domain": row["target_domain"], "kind": 1,
-                            }, room=str(row["user_id"]))
-                            upload_file_to_server(
-                                REMOVAL_UPLOAD_URL_TEMPLATE.format(
-                                    domain=row["target_domain"], user_id=row["user_id"]),
-                                path,
-                            )
-                            last_removal_processed_at.set(user_id_str, time.time())
-                        except (RemovalModuleMissing, NotImplementedError):
-                            _set_step(conn, row["id"], 4, "module_missing")
-                            # Don't update the pacing timer — a missing-module
-                            # "skip" shouldn't burn this user's rate window.
-                        except IncompletePII as e:
-                            _set_step(conn, row["id"], 5, "missing_pii:" + ",".join(e.args[0]))
-                        except CCPADailyLimitReached as e:
-                            # Per-user daily CCPA email cap hit. Leave the row
-                            # at step=0 so it gets retried tomorrow (counter resets at midnight).
-                            _set_step(conn, row["id"], 0)
-                            log.info("ccpa throttle: id=" + str(row["id"]) + " " + str(e))
-                        except Exception:
-                            log.exception("removal row failed id=%s", row["id"])
-                            _set_step(conn, row["id"], 3, "broker_raised")
-                            last_removal_processed_at.set(user_id_str, time.time())
-                    except Exception:
-                        log.exception("removal outer row error id=%s", row.get("id"))
+            # Barrier per tick: claimed rows are step=1 so a re-fetch couldn't
+            # double-claim anyway, but waiting keeps pacing/in-flight state
+            # simple and bounds how much work is ever queued at once.
+            if futures:
+                concurrent.futures.wait(futures)
+                for f in futures:
+                    if f.exception() is not None:
+                        log.error("removal worker crashed: %r", f.exception())
         except Exception:
             log.exception("removal tick failed")
         finally:
@@ -671,10 +1061,9 @@ def runs(x):
     if x == 0:
         process_groups()
     elif x == 1:
-        # Reserved slot — historically ran google_scan as a separate thread
-        # but it's now pumped from process_groups() to share the same conn
-        # lifecycle. Keep the slot so executor.map(range(5)) still works.
-        pass
+        # Historically ran google_scan (now pumped from process_groups()).
+        # Reused for housekeeping: stale-claim recovery + chrome reaper.
+        maintenance_loop()
     elif x == 2:
         process_groups_removal()
     elif x == 3:

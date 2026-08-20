@@ -803,3 +803,26 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
         # If we can't save the eml, the email still went out. Return
         # None so upload_file_to_server logs "upload skipped" (harmless).
         return None
+
+
+def ccpa_global_quota_reached():
+    """True when today's global CCPA email budget is already spent.
+
+    Cheap read of the same counter file _ccpa_increment_or_raise() writes,
+    taken under the same lock. manage.py calls this once per removal tick so
+    it can EXCLUDE email-based brokers from task selection instead of
+    claiming their rows, raising CCPADailyLimitReached hundreds of times and
+    clogging each user's fairness window with rows that cannot progress.
+    """
+    import json, datetime
+    today = datetime.date.today().isoformat()
+    lock = _ccpa_get_lock()
+    with lock:
+        try:
+            with open(_CCPA_COUNTER_PATH, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return False
+    if state.get("date") != today:
+        return False  # stale file: counter will reset on next increment
+    return int(state.get("counts", {}).get("_global", 0)) >= CCPA_TOTAL_PER_DAY

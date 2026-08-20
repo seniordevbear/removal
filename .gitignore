@@ -1,3 +1,35 @@
-/Screen_shot
-/ScreenShot
-/ScreenShotScan
+# Credentials — NEVER commit. Copy .env.example to .env and fill in.
+.env
+*.pem
+
+# Customer evidence (contains customer names/emails in filenames) and
+# browser profiles (contains logged-in sessions/cookies).
+ScreenShot*/
+screen_shot/
+sites_scan/
+sites_scan_google/
+user_data/
+assets/
+
+# Virtualenv (rebuild with: python -m venv . && Scripts\pip install -r requirements.txt)
+Lib/site-packages/
+lib/site-packages/
+Include/
+Scripts/
+pyvenv.cfg
+removal/
+
+# Runtime state and junk
+__pycache__/
+*.pyc
+*.log
+*.bak.*
+*.bak-*
+dump.rdb
+*.rdb
+ccpa_email_counter.json
+captcha.png
+__downloaded.mp3
+info.jpeg
+extension.zip
+pkgs.txt

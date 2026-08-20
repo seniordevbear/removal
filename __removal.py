@@ -16,8 +16,11 @@
 #
 # Hard rule: this file MUST NOT contain hardcoded credentials, PII
 # defaults, or fallback values that get sent to brokers.
+import datetime
 import importlib
+import os
 import sys
+import threading
 import traceback
 
 
@@ -113,6 +116,52 @@ def _import_broker(target_domain):
         raise
 
 
+# --- screenshot folder: resolve per-run, not per-process ---------------------
+#
+# Nearly every script in sites/ computes, at *module import* time:
+#
+#     now            = datetime.datetime.now()
+#     current_date   = now.strftime("%Y-%m-%d")
+#     screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
+#     os.makedirs(screentShotDir, exist_ok=True)
+#
+# Python imports each module once per process. This service runs for weeks
+# without a restart, so `current_date` froze on the day the service happened
+# to start: every screenshot for the entire run piled into that one folder,
+# mislabelled for every day after the first, and NTFS degrades badly once a
+# directory holds hundreds of thousands of entries.
+#
+# The broker functions read these names as module *globals* at call time, so
+# rebinding them here — once per removal, at the single point where every
+# broker module is imported — fixes all 277 scripts without editing any of
+# them. Only names the script already defines are rebound, so a script that
+# does its own thing is left alone.
+_SCREENSHOT_DIR_LOCK = threading.Lock()
+
+
+def _refresh_screenshot_dir(module):
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    if getattr(module, "current_date", None) == today:
+        return  # already current — the common case, no syscall needed
+    base = getattr(module, "base_dir", None) or os.getcwd()
+    out_dir = os.path.join(base, "ScreenShot", today)
+    try:
+        with _SCREENSHOT_DIR_LOCK:
+            os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:
+        # Don't fail the removal over a screenshot folder; the broker will
+        # fall back to whatever path it already had.
+        print("[SCREENSHOT_DIR_FAILED] {} {}".format(out_dir, e),
+              file=sys.stderr, flush=True)
+        return
+    if hasattr(module, "now"):
+        module.now = datetime.datetime.now()
+    if hasattr(module, "current_date"):
+        module.current_date = today
+    if hasattr(module, "screentShotDir"):
+        module.screentShotDir = out_dir
+
+
 def removal(sio, target_domain, site_url, req_id, user_id, email, firstname,
             lastname, city, zip, state, age, address, phone, birth_day,
             birth_month, birth_year, area_code, street, county):
@@ -151,6 +200,8 @@ def removal(sio, target_domain, site_url, req_id, user_id, email, firstname,
             flush=True,
         )
         raise
+
+    _refresh_screenshot_dir(module)
 
     fn = getattr(module, target_domain, None)
     if not callable(fn):
