@@ -2,22 +2,32 @@
 .env
 *.pem
 
-# Customer evidence (contains customer names/emails in filenames) and
-# browser profiles (contains logged-in sessions/cookies).
+# Customer evidence (filenames contain customer names) and browser profiles
+# (contain logged-in sessions/cookies).
 ScreenShot*/
 screen_shot/
-sites_scan/
 sites_scan_google/
 user_data/
 assets/
 
-# Virtualenv (rebuild with: python -m venv . && Scripts\pip install -r requirements.txt)
+# Virtualenv.
+#
+# On Windows the venv lives in the pipeline root itself, and the filesystem is
+# case-insensitive — so `Lib\` (venv) and `lib\` (our 8 custom modules) are the
+# SAME directory. That is why only `site-packages` is excluded here and never
+# `lib/` or `Lib/` wholesale: ignoring the directory would drop
+# broker_helpers.py, automation_delay.py, captcha.py, common.py,
+# email_sender.py, email_verification.py, proxies.py and safe_browser.py from
+# the repo, and manage.py will not start without them.
 Lib/site-packages/
 lib/site-packages/
 Include/
 Scripts/
 pyvenv.cfg
-removal/
+
+# Belt and braces: the custom modules are tracked no matter what.
+!lib/*.py
+!Lib/*.py
 
 # Runtime state and junk
 __pycache__/
