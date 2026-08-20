@@ -53,6 +53,7 @@ def make_standard_num(num) :
     return ret
 
 def weinformorgus(dataRow, website_name, in_user_email, run_mode) : 
+    page = None
     try : 
             
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
@@ -141,5 +142,12 @@ def weinformorgus(dataRow, website_name, in_user_email, run_mode) :
     except Exception:
         # If file creation fails, fall back to returning the directory (still a valid path).
         return screentShotDir
+        raise
+    finally:
+        if page is not None:
+            try:
+                page.quit()
+            except Exception:
+                pass
 
     return success_path

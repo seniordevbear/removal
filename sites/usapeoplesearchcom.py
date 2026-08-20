@@ -49,6 +49,7 @@ def make_standard_num(num) :
     return ret
 
 def usapeoplesearchcom(dataRow, website_name, in_user_email, run_mode) : 
+    page = None
     try : 
             
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
@@ -119,5 +120,12 @@ def usapeoplesearchcom(dataRow, website_name, in_user_email, run_mode) :
             print("Error Confirmation API is sent successfully!")
         except Exception as e:
             print("Error Confirmation API is failed: ", str(e))
+        raise
+    finally:
+        if page is not None:
+            try:
+                page.quit()
+            except Exception:
+                pass
 
     return None

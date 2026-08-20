@@ -491,10 +491,9 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
     zipc = (dataRow.get("Zipcode") or "").strip()
 
     screenshot_path = None
-    page = None
-    try:
-        with safe_chromium_for_broker(broker_name,
-                                      headless=(run_mode == "headless")) as page:
+    with safe_chromium_for_broker(broker_name,
+                                  headless=(run_mode == "headless")) as page:
+        try:
 
             def _has_form():
                 for sel in ("css:input[name*='[fname]']",
@@ -554,14 +553,14 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
                     log_step(broker_name, concept + " toggle not present",
                              logging.WARNING)
 
-            def _fill(label_aliases, value, required=False):
+            def _fill(label_aliases, value, required=False, extra_cands=()):
                 if not value:
                     if required:
                         raise RuntimeError(
                             "required field " + repr(label_aliases[0]) +
                             " has no value for this user")
                     return
-                cands = []
+                cands = list(extra_cands)
                 for alias in label_aliases:
                     cands.append("css:input[id*='%s' i]" % alias)
                     cands.append("css:input[name*='%s' i]" % alias)
@@ -575,7 +574,17 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
                              "field %s not on this form, skipped" % label_aliases[0],
                              logging.INFO)
                     return
-                el.click()
+                # WPForms sub-fields can be styled without a boundable rect;
+                # a normal click then raises NoRectError. Fall back to a JS
+                # click, and scroll the element into view first.
+                try:
+                    el.click()
+                except Exception:
+                    try:
+                        page.scroll.to_see(el)
+                    except Exception:
+                        pass
+                    el.click(by_js=True)
                 sleep(random.uniform(0.05, 0.12))
                 el.input(value)
                 sleep(0.2)
@@ -586,7 +595,7 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
             _fill(["last", "lname"], last, required=True)
             # everything else is best-effort: present on WPForms, absent on
             # InfoPay, and absence must not kill the run.
-            _fill(["email"], email)
+            _fill(["email"], email, extra_cands=("css:input[type=email]",))
             _fill(["addressLine1", "address1", "address-1", "address"], address_line_1)
             _fill(["city"], city)
             _fill(["zip", "postal"], zipc)
@@ -649,13 +658,15 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
             screenshot_path = screenshot_step(page, broker_name, "after_submit") or screenshot_path
             log_step(broker_name, "submitted, exiting")
             return screenshot_path
-    except Exception:
-        if page is not None:
+        except Exception:
+            # capture what the bot was looking at WHILE the browser is still
+            # open — the with-block quits Chrome on exit, and a screenshot
+            # against a closed browser only yields "connection disconnected".
             try:
                 screenshot_path = screenshot_step(page, broker_name, "error") or screenshot_path
             except Exception:
                 pass
-        raise
+            raise
 
 
 # ---------------------------------------------------------------------------

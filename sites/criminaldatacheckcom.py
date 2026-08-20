@@ -102,6 +102,7 @@ def criminaldatacheckcom(dataRow, website_name, in_user_email, run_mode) :
             print("Error Confirmation API is sent successfully!")
         except Exception as e:
             print("Error Confirmation API is failed: ", str(e))
+        raise
 
     return None
 

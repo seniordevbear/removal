@@ -42,6 +42,7 @@ def get_chromium_options(arguments: list) -> ChromiumOptions:
     return options
 
 def peoplesearchnowcom(dataRow, website_name, in_user_email, run_mode):
+    page = None
     
     try :
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
@@ -205,7 +206,13 @@ def peoplesearchnowcom(dataRow, website_name, in_user_email, run_mode):
             page.get_screenshot(screenshot_save_path)
         except Exception as e:
             print("Error Confirmation API is failed: ", str(e))
+        raise
 
-    page.quit()
+    finally:
+        if page is not None:
+            try:
+                page.quit()
+            except Exception:
+                pass
 
     return screenshot_save_path

@@ -76,6 +76,7 @@ def fill_input_data(page, dataRow) :
 
 
 def publicdatausacom(dataRow, website_name, in_user_email, run_mode) : 
+    page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
@@ -143,7 +144,13 @@ def publicdatausacom(dataRow, website_name, in_user_email, run_mode) :
             page.get_screenshot(screenshot_save_path)
         except Exception as e:
             print("Error Confirmation API is failed: ", str(e))
+        raise
 
-    page.quit()
+    finally:
+        if page is not None:
+            try:
+                page.quit()
+            except Exception:
+                pass
 
     return screenshot_save_path

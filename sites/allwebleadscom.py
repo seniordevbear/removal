@@ -60,6 +60,7 @@ def fill_input_data(page, dataRow) :
 
 
 def allwebleadscom(dataRow, website_name, in_user_email, run_mode) : 
+    page = None
     try : 
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
         errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
@@ -135,7 +136,13 @@ def allwebleadscom(dataRow, website_name, in_user_email, run_mode) :
             page.get_screenshot(screenshot_save_path)
         except Exception as e:
             print("Error Confirmation API is failed: ", str(e))
+        raise
 
-    page.quit()
+    finally:
+        if page is not None:
+            try:
+                page.quit()
+            except Exception:
+                pass
 
     return screenshot_save_path

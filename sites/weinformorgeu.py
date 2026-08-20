@@ -53,6 +53,7 @@ def make_standard_num(num) :
     return ret
 
 def weinformorgeu(dataRow, website_name, in_user_email, run_mode) : 
+    page = None
     try : 
             
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
@@ -135,5 +136,12 @@ def weinformorgeu(dataRow, website_name, in_user_email, run_mode) :
             f.write(f"Phone: {dataRow.get('Phone Number', '')}\n")
     except Exception:
         return screentShotDir
+        raise
+    finally:
+        if page is not None:
+            try:
+                page.quit()
+            except Exception:
+                pass
 
     return success_path

@@ -115,5 +115,6 @@ def affordablebackgroundcheckscom(dataRow, website_name, in_user_email, run_mode
             f.write(f"Removal request completed for affordablebackgroundchecks.com for {dataRow.get('Name', '')}\n")
     except Exception:
         return screentShotDir
+        raise
 
     return success_path

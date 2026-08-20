@@ -43,6 +43,14 @@ import logging
 import threading
 import contextlib
 import concurrent.futures
+import warnings
+
+# The legacy broker scripts are full of Windows paths in plain strings
+# ("\\PeekyouCom_..."), which Python 3.12 reports as SyntaxWarning on
+# first import — ~300 harmless lines of noise in the log. Filter ONLY
+# that specific message; real warnings still surface.
+warnings.filterwarnings("ignore", category=SyntaxWarning,
+                        message="invalid escape sequence")
 from collections import OrderedDict
 
 import mysql.connector
