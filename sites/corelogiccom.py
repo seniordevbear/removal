@@ -85,7 +85,7 @@ def fill_input_data(page, dataRow) :
     country_select.select.by_text("United States")
 
     state_select = page.ele("tag:select@@name=hs_state_code")
-    state_select.select.by_text(dataRow["State"])
+    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
     phone_input = page.ele("tag:input@@name=phone")
     phone_input.click()

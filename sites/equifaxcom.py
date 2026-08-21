@@ -144,7 +144,7 @@ def equifaxcom(dataRow, website_name, in_user_email, run_mode) :
         sleep(0.5)
 
         state_select = page.ele("tag:select@@id=state")
-        state_select.select.by_text(dataRow["State"])
+        __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
         sleep(0.5)
 

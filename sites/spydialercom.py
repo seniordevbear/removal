@@ -47,7 +47,7 @@ def fill_input_data(page, dataRow) :
     
     page.wait.ele_displayed("tag:select@@id=SttFltrDrpDwnLst")
     state_element = page.ele("tag:select@@id=SttFltrDrpDwnLst")
-    state_element.select.by_text(dataRow["State"])
+    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_element, dataRow["State"])
 
 def spydialercom(dataRow, website_name, in_user_email, run_mode) : 
     page = None

@@ -67,7 +67,7 @@ def fill_input_data(page, dataRow) :
     _human_type2(city_input, dataRow["City"])
 
     state_select = main_container.ele("tag:select@@id=state")
-    state_select.select.by_text(dataRow["State"])
+    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
     email_input = main_container.ele("tag:input@@id=email")
     email_input.click()

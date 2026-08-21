@@ -101,7 +101,7 @@ def fill_input_data(page, dataRow) :
     _human_type2(city_input, dataRow["City"])
 
     state_select = app_address.ele("tag:select@@id=addressState")
-    state_select.select.by_text(dataRow["State"])
+    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
     
 
     zip_input = app_address.ele("tag:input@@id=addressZip")

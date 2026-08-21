@@ -68,7 +68,7 @@ def fill_input_data(page, dataRow) :
     sleep(1)
 
     state_select = page.ele("tag:select@@name=State")
-    state_select.select.by_text(dataRow["State"])
+    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
     delete_checkbox = page.ele("tag:label@@text():Deletion/erasure request")
     delete_checkbox.click()

@@ -93,7 +93,7 @@ def fill_input_data(page, dataRow) :
 
     try :
         state_select = page.ele("tag:select@@name=state")
-        state_select.select.by_text(dataRow["State"])
+        __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
     except:
         pass
 

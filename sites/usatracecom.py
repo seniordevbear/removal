@@ -122,7 +122,7 @@ def usatracecom(dataRow, website_name, in_user_email, run_mode) :
         _human_type2(city_input, dataRow["City"])
 
         state_select = form_container.ele("tag:select@@id=teaser-state")
-        state_select.select.by_text(dataRow["State"])
+        __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
         search_button = form_container.ele("tag:input@@id=teaser-submitted")
         search_button.click()

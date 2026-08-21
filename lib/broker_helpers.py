@@ -445,6 +445,45 @@ def _broker_to_request_portal_url(broker_name):
     return "https://" + host + "/request-portal"
 
 
+_US_STATE_ABBREV = {v: k for k, v in _US_STATE_FULL.items()}
+
+
+def select_state(select_ele, raw, timeout=4.0):
+    """Select a state <option> regardless of which format the site uses.
+
+    Customer profiles store two-letter codes ("CA") but many broker
+    dropdowns list full names ("California") — and some the reverse, or
+    match only on the option's value attribute. A bare
+    select.by_text(dataRow["State"]) therefore failed whenever formats
+    disagreed (seen live on addresssearchcom, 46 scripts affected).
+    Tries text and value for both spellings before giving up loudly."""
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("state is empty for this user")
+    cands = [raw]
+    full = _state_full_name(raw)
+    if full not in cands:
+        cands.append(full)
+    ab = _US_STATE_ABBREV.get(full)
+    if ab and ab not in cands:
+        cands.append(ab)
+    for cand in cands:
+        for method in ("by_text", "by_value"):
+            try:
+                getattr(select_ele.select, method)(cand, timeout=timeout)
+                return cand
+            except TypeError:
+                # older DrissionPage: no timeout kwarg
+                try:
+                    getattr(select_ele.select, method)(cand)
+                    return cand
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    raise RuntimeError("no state option matched; tried " + repr(cands))
+
+
 def _state_full_name(raw):
     """User profile might store state as 'CA' or 'California'. The dropdown
     on the request portal wants the full name. Normalize."""

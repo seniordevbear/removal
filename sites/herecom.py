@@ -82,7 +82,7 @@ def herecom(dataRow, website_name, in_user_email, run_mode) :
         sleep(1)
 
         state_select = page.ele("tag:select@@id=edit-state-residency")
-        state_select.select.by_text(dataRow["State"])
+        __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
         sleep(1)
 

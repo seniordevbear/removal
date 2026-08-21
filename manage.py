@@ -58,6 +58,23 @@ import requests
 from flask import Flask, request
 from flask_socketio import SocketIO, join_room
 
+# 70 broker scripts call ChromiumOptions.add_extension("adblock"/"extension")
+# at RUN time. After the server rebuild the adblock folder (378MB, not in
+# git) was missing, and every one of those scripts crashed with
+# FileNotFoundError before the browser even launched. An ad-blocker is an
+# optimization, not a requirement — so patch add_extension to skip a missing
+# folder (chainably) instead of killing the removal.
+from DrissionPage import ChromiumOptions as _CO
+_orig_add_extension = _CO.add_extension
+
+def _safe_add_extension(self, path, *a, **kw):
+    if not os.path.exists(path):
+        log.warning("extension folder missing, running without it: %s", path)
+        return self  # keep .add_extension(...) chains working
+    return _orig_add_extension(self, path, *a, **kw)
+
+_CO.add_extension = _safe_add_extension
+
 from __scan import scan as scan_dispatch, ModuleMissing as ScanModuleMissing
 from __scanGoogle import google_scan as google_scan_dispatch, ModuleMissing as GoogleScanModuleMissing
 from __removal import (

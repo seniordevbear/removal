@@ -114,7 +114,7 @@ def idtruecom(dataRow, website_name, in_user_email, run_mode) :
         _human_type2(city_input, dataRow["City"])
 
         state_select = page.ele("tag:select@@id=o_state")
-        state_select.select.by_text(dataRow["State"])
+        __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
         submit_button = page.ele("tag:button@@type=submit")
         submit_button.click()

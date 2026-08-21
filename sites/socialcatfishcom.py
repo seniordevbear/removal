@@ -56,7 +56,7 @@ def fill_input_data(page, dataRow) :
     
     state_select = page.ele("tag:select@@id=ccpa_state")
     print(state_select)
-    state_select.select.by_text(dataRow["State"])
+    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
     fName_input = page.ele("tag:input@@name=firstname")
     fName_input.click()

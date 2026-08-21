@@ -75,7 +75,7 @@ def fill_input_data(page, dataRow) :
     _human_type2(email_input, email_str)
     
     state_select = page.ele("tag:select@@id=State")
-    state_select.select.by_text(dataRow["State"])
+    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
     consumer_select = page.ele("tag:select@@id=areYoutheConsumer")
     consumer_select.select.by_value("Yes")

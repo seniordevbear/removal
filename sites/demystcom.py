@@ -80,7 +80,7 @@ def fill_input_data(page, dataRow) :
     
     
     state_element = page.ele("tag:select@@name=State")
-    state_element.select.by_text(dataRow["State"])
+    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_element, dataRow["State"])
 
 def demystcom(dataRow, website_name, in_user_email, run_mode) : 
     page = None

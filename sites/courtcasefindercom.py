@@ -114,7 +114,7 @@ def courtcasefindercom(dataRow, website_name, in_user_email, run_mode) :
         _human_type2(lName_input, lName)
 
         state_select = page.ele("tag:select@@id:state")
-        state_select.select.by_text(dataRow["State"])
+        __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
         
         city_input = page.ele("tag:input@@id:city")
         city_input.click()

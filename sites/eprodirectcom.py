@@ -74,7 +74,7 @@ def fill_input_data(page, dataRow) :
     _human_type2(city_input, dataRow["City"])
 
     state_element = page.ele("tag:select@@id=wpforms-208196-field_7-state")
-    state_element.select.by_text(dataRow["State"])
+    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_element, dataRow["State"])
 
     zip_input = page.ele("tag:input@@id=wpforms-208196-field_7-postal")
     zip_input.clear()
