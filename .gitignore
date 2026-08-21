@@ -39,10 +39,9 @@ removal/
 !lib/*.py
 !Lib/*.py
 
-# The AdBlock extension folder is 378MB — far too heavy for git. Deploy it
-# once by copying the folder to the pipeline root on the VPS; the pipeline
-# survives without it (add_extension is patched to skip missing folders).
-adblock/
+# NOTE: adblock/ IS tracked (378MB, 745 files). It is committed so a rebuilt
+# server gets the ad blocker straight from the clone. manage.py still patches
+# add_extension to skip a missing folder, so a shallow/partial checkout works.
 
 # Runtime state and junk
 __pycache__/
