@@ -972,6 +972,60 @@ def _requeue_recovered_pii():
                 pass
 
 
+def _requeue_fixed_domains():
+    """Give failed rows a second chance once their broker is PROVEN fixed.
+
+    step=3 rows were terminal: after a broker script broke, every customer's
+    row for that domain failed once and then sat there forever — even after
+    the script was repaired (audited 2026-08-22: the arrests.org family and
+    advancedbackgroundcheckscom kept 60-94 historical failures each while
+    NEW rows for the same domains were succeeding). The proof-of-fix signal
+    is simple: the same domain has a step=2 completion NEWER than the row's
+    failure. Each row gets exactly one such retry ($.fixed_retry flag), so a
+    broker that breaks again cannot loop its old failures."""
+    conn = None
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cur = conn.cursor()
+        try:
+            # Derived table keeps MySQL happy about selecting from the table
+            # being updated; LIMIT bounds each pass.
+            cur.execute(
+                "UPDATE results r "
+                "SET r.step = 0, "
+                "    r.data = JSON_SET(COALESCE(r.data, '{}'), '$.fixed_retry', 1) "
+                "WHERE r.id IN (SELECT id FROM ("
+                "    SELECT r2.id FROM results r2 "
+                "      JOIN users u ON u.id = r2.user_id "
+                "    WHERE r2.kind = 1 AND r2.step = 3 "
+                "      AND COALESCE(r2.data->>'$.fixed_retry', 0) = 0 "
+                + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
+                   "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
+                   if REMOVAL_PAID_USERS_ONLY else "") +
+                "      AND EXISTS (SELECT 1 FROM results s "
+                "                  WHERE s.target_domain = r2.target_domain "
+                "                    AND s.kind = 1 AND s.step = 2 "
+                "                    AND s.updated_at > r2.updated_at) "
+                "    LIMIT %s) x)",
+                (PII_REQUEUE_BATCH,),
+            )
+            n = cur.rowcount
+            conn.commit()
+            if n:
+                log.info("fixed-domain retry: requeued %d failed row(s) whose "
+                         "broker has succeeded since they failed", n)
+        finally:
+            cur.close()
+    except Exception:
+        log.exception("fixed-domain requeue failed")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def maintenance_loop():
     """Worker 1 (the historically reserved slot): housekeeping.
 
@@ -987,6 +1041,7 @@ def maintenance_loop():
         _reap_old_chrome()
         _refresh_stale_row_pii()
         _requeue_recovered_pii()
+        _requeue_fixed_domains()
 
 
 # The only two brokers that drive the real desktop mouse/keyboard via
