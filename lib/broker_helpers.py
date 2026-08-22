@@ -448,6 +448,27 @@ def _broker_to_request_portal_url(broker_name):
 _US_STATE_ABBREV = {v: k for k, v in _US_STATE_FULL.items()}
 
 
+def state_abbrev(raw):
+    """Two-letter state code from whatever the profile holds.
+
+    36 broker scripts did usaStateDictionary[dataRow["State"]] — a dict
+    keyed by FULL names — while profiles now hold "NC", "Tx", "" or even
+    "Paris" (a non-US customer). Every mismatch was a KeyError crash.
+    Accepts either spelling, any case; unknown/empty values raise a clear
+    ValueError so the row is recorded as failed with a readable reason
+    instead of KeyError: ''.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("user state is empty; broker form requires it")
+    if len(raw) == 2 and raw.upper() in _US_STATE_FULL:
+        return raw.upper()
+    ab = _US_STATE_ABBREV.get(raw.title())
+    if ab:
+        return ab
+    raise ValueError("unrecognized US state %r" % raw)
+
+
 def select_state(select_ele, raw, timeout=4.0):
     """Select a state <option> regardless of which format the site uses.
 

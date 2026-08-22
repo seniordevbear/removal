@@ -91,8 +91,8 @@ def fill_input_data(page, dataRow) :
     _human_type2(country_input, "United States")
 
     state_select = page.ele("tag:select@@id=State")
-    state_select.select.by_text(usaStateDictionary[dataRow["State"]])
-    print(usaStateDictionary[dataRow["State"]])
+    state_select.select.by_text(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
+    print(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
 
     zip_input = page.ele("tag:input@@id=PostalCode")
     zip_input.click()

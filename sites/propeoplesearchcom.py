@@ -95,8 +95,8 @@ def fill_input_data(page, dataRow) :
     try :
         state_select = page.ele("tag:select@@name=state")
         print(state_select)
-        print(usaStateDictionary[dataRow["State"]])
-        state_select.select.by_value(usaStateDictionary[dataRow["State"]])
+        print(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
+        state_select.select.by_value(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
     except :
         pass
 

@@ -60,7 +60,7 @@ def fill_input_data(page, dataRow) :
     _human_type2(fullName_input, dataRow["Name"])
 
     state_element = page.ele("tag:select@@name=state-of-residence")
-    state_element.select.by_text(usaStateDictionary[dataRow["State"]])
+    state_element.select.by_text(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
 
     optout_radio = page.ele("tag:input@@type=radio@@value=I wish to opt-out of the sale of my personal information or personal data, and its use for cross context behavioral advertising or targeted advertising, as applicable.")
     optout_radio.click()

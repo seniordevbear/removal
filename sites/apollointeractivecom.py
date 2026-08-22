@@ -74,7 +74,7 @@ def fill_input_data(page, dataRow) :
     _human_type2(city_input, dataRow["City"])
 
     state_select = page.ele("tag:select@@type=text")
-    state_select.select.by_value(usaStateDictionary[dataRow["State"]])
+    state_select.select.by_value(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
 
     zip_input = page.ele("tag:input@@placeholder=Enter Zipcode")
     zip_input.click()

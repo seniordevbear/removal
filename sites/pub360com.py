@@ -110,7 +110,7 @@ def pub360com(dataRow, website_name, in_user_email, run_mode):
         sleep(random.uniform(0.1, 0.5))
         _human_type2(fullName_input, dataRow["Name"])
 
-        city_state = dataRow["City"] + ", " + usaStateDictionary[dataRow["State"]]
+        city_state = dataRow["City"] + ", " + __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"])
         city_state_input = page.ele("tag:input@@id=city_state")
         city_state_input.click()
         sleep(random.uniform(0.1, 0.5))

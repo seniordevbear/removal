@@ -82,7 +82,7 @@ def fill_input_data(page, dataRow) :
     _human_type2(city_input, dataRow["City"])
 
     state_select = page.ele("tag:select@@id=ddlAddressState")
-    state_select.select.by_text(usaStateDictionary[dataRow["State"]])
+    state_select.select.by_text(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
 
     phone_input = page.ele("tag:input@@id=content_txtPhoneNum")
     phone_input.click()

@@ -112,7 +112,7 @@ def fill_input_data(page, dataRow) :
     state_input = page.ele("tag:input@@name=state")
     state_input.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(state_input, usaStateDictionary[dataRow["State"]])
+    _human_type2(state_input, __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
 
     zip_input = page.ele("tag:input@@name=zip")
     zip_input.click()

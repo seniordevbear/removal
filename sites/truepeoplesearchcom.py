@@ -166,7 +166,7 @@ def truepeoplesearchcom(dataRow, website_name, in_user_email, run_mode) :
         city_state_input.click()
         print("typing the city...")
         sleep(random.uniform(0.1,0.5))
-        _human_type2(city_state_input, dataRow["City"]+", "+ usaStateDictionary[dataRow["State"]])
+        _human_type2(city_state_input, dataRow["City"]+", "+ __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
 
         search_btn = page.ele("tag:button@@id=btnSubmit-d-n")
         search_btn.click()

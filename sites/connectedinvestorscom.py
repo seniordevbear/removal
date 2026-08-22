@@ -55,7 +55,7 @@ def fill_input_data(page, dataRow) :
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name 
 
     state_element = page.ele("tag:select@@id=IO:487e72cedb3e3158665f18281396196a")
-    state_element.select.by_text(usaStateDictionary[dataRow["State"]])
+    state_element.select.by_text(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
     
     owner_element = page.ele("tag:select@@id=IO:c87e72cedb3e3158665f182813961952")
     owner_element.select.by_text("Self (Consumer)")

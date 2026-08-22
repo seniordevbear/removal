@@ -80,7 +80,7 @@ def fill_input_data(page, dataRow) :
     _human_type2(city_input, dataRow["City"])
 
     state_element = iframe_container.ele("tag:select@@id=awf_field-107375607state")
-    state_element.select.by_text(usaStateDictionary[dataRow["State"]])
+    state_element.select.by_text(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
 
     zip_input = iframe_container.ele("tag:input@@id=awf_field-107375607zip")
     zip_input.click()

@@ -149,7 +149,7 @@ def fastpeoplesearchcom(dataRow, website_name, in_user_email, run_mode):
         _human_type2(fullName_input, dataRow["Name"])
         fullName_input.input(Keys.TAB)
 
-        city_state = dataRow["City"] + ", " + usaStateDictionary[dataRow["State"]]
+        city_state = dataRow["City"] + ", " + __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"])
         city_state_input = page.ele("tag:input@@id=search-name-address")
 
         sleep(random.uniform(0.1, 0.5))

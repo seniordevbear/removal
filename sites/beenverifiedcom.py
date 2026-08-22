@@ -110,7 +110,7 @@ def fill_input_data(page, dataRow) :
     state_input.click()
     modal_container = page.ele("tag:div@@class:MuiPaper-root")
 
-    state_li = modal_container.ele(f"tag:li@@text()={usaStateDictionary[dataRow["State"]]}")
+    state_li = modal_container.ele(f"tag:li@@text()={__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"])}")
     state_li.click()
 
     zip_input = form_container.ele("tag:input@@id=zip")

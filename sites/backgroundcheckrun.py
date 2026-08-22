@@ -84,7 +84,7 @@ def backgroundcheckrun(dataRow, website_name, in_user_email, run_mode) :
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
 
-        url_str = f"https://backgroundcheck.run/ng/profile/search?fname={fName}&lname={lName}&state={usaStateDictionary[dataRow["State"]]}&city={dataRow["City"]}"
+        url_str = f"https://backgroundcheck.run/ng/profile/search?fname={fName}&lname={lName}&state={__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"])}&city={dataRow["City"]}"
         page.get(url_str)        
 
         people_list = page.eles("tag:a@@class=b-pfl-list")
