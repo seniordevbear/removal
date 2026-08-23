@@ -100,7 +100,13 @@ def screenshot_step(page, broker: str, step: str, base_dir: Optional[str] = None
     a postmortem can walk through what the bot saw at each stage."""
     base = base_dir or os.getcwd()
     today = datetime.datetime.now().strftime("%Y-%m-%d")
-    out_dir = os.path.join(base, "ScreenShot", today, broker)
+    # Error captures go to their own folder so debugging never means
+    # digging through hundreds of success screenshots:
+    #   ScreenShot/<date>/errors/<broker>/<time>_error.png
+    if "error" in (step or "").lower():
+        out_dir = os.path.join(base, "ScreenShot", today, "errors", broker)
+    else:
+        out_dir = os.path.join(base, "ScreenShot", today, broker)
     try:
         os.makedirs(out_dir, exist_ok=True)
     except OSError:

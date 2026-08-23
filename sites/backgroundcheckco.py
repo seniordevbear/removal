@@ -49,6 +49,15 @@ def fill_input_data(page, dataRow) :
 
     form_inputs = page.eles("tag:input@@class=form__input")
 
+    if not form_inputs:
+        # 2026-08-23: backgroundcheck.co/optout loads no form — the site is
+        # unreachable/dead even from a residential browser (user-verified).
+        # Fail with the real reason instead of IndexError so the report is
+        # honest; the proven-fix retry will resurrect these rows if the
+        # site ever comes back and a run succeeds.
+        raise RuntimeError(
+            "backgroundcheck.co opt-out page is dead (no form rendered); "
+            "site verified unreachable 2026-08-23")
     fName_input = form_inputs[0]
     fName_input.click()
     print("typing the first name...")

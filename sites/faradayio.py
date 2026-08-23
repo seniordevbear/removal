@@ -1,145 +1,84 @@
-from DrissionPage import ChromiumPage, ChromiumOptions
-from time import sleep
-import json
-import random
-import os, datetime, pyautogui, requests
-from lib.common import generate_email, generate_phone_number
-
-now = datetime.datetime.now()
-current_date = now.strftime("%Y-%m-%d")
-base_dir = os.getcwd()
-
-screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
-os.makedirs(screentShotDir, exist_ok=True)
-
-def get_chromium_options(arguments: list) -> ChromiumOptions:
-    """
-    Configures and returns Chromium options.
-    
-    :param browser_path: Path to the Chromium browser executable.
-    :param arguments: List of arguments for the Chromium browser.
-    :return: Configured ChromiumOptions instance.
-    """
-    options = ChromiumOptions()
-    # options.no_imgs(True)
-    # options.no_imgs(True).mute(True).no_js(True)
-    # options.set_argument('--auto-open-devtools-for-tabs', 'true') # we don't need this anymore
-    for argument in arguments:
-        options.set_argument(argument)
-    return options
-
-def _human_type2(element , text: str) -> None:
-    """
-    Types in a way reminiscent of a human, with a random delay in between 50ms to 100ms for every character
-    :param element: Input element to type text to
-    :param text: Input to be typed
-    """
-
-    for c in text:
-        element.input(c)
-
-        sleep(random.uniform(0.05, 0.1))
+from lib.broker_helpers import log_step, screenshot_step
+import os
+import datetime
+import requests
 
 
-def fill_input_data(page, dataRow) : 
-    
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+# Rewritten 2026-08-23. faraday.ai/privacy-options embeds a Google Form
+# ("Faraday Data Deletion/Opt-out/Do-Not-Sell request form"); the old
+# browser flow targeted a page layout that no longer exists and failed for
+# every customer. Google Forms accepts a plain POST to formResponse with
+# the entry ids below (extracted from FB_PUBLIC_LOAD_DATA_ on the live
+# form) — no browser, no captcha, and immune to page redesigns unless the
+# form itself is rebuilt (in which case the entry ids stop matching and
+# this fails loudly with the response text).
+_FORM_ID = "1FAIpQLSd4h_G6XcXXpHq8FGeYgHH9CkQ3s4_qdIE-ZBKlNtdzKSXPfA"
+_URL = "https://docs.google.com/forms/d/e/%s/formResponse" % _FORM_ID
 
-    delete_iframe_element = page.eles("tag:iframe")[0]
-    fName_input = delete_iframe_element.ele("tag:input@@aria-labelledby=i5 i8")
-    fName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
-
-    lName_input = delete_iframe_element.ele("tag:input@@aria-labelledby=i10 i13")
-    lName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    email_input = delete_iframe_element.ele("tag:input@@type=email")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
+_ENTRIES = {
+    "first":  "entry.1544865296",   # First name (required)
+    "last":   "entry.457414109",    # Last name (required)
+    "dob":    "entry.580305585",    # Date of birth (optional)
+    "address":"entry.1296567634",   # Address (optional)
+    "city":   "entry.29073984",     # City (optional)
+    "state":  "entry.172887688",    # State (optional)
+    "type":   "entry.1821666757",   # request type (required, choices)
+    "who":    "entry.713444953",    # Consumer / Authorized Agent (required)
+}
 
 
-    street_input = delete_iframe_element.ele("tag:textarea@@aria-labelledby=i15 i18")
-    street_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(street_input, dataRow["Address"])
+def faradayio(dataRow, website_name, in_user_email, run_mode):
+    broker = "faradayio"
+    name_full = (dataRow.get("Name") or "").strip()
+    parts = name_full.split()
+    first = parts[0] if parts else ""
+    last = parts[-1] if len(parts) > 1 else ""
+    if not first or not last:
+        raise RuntimeError("faradayio: form requires first AND last name")
 
+    dob = ""
+    if dataRow.get("Birth Year") and dataRow.get("Birth Month") and dataRow.get("Birth Day"):
+        dob = "%s/%s/%s" % (dataRow["Birth Month"], dataRow["Birth Day"], dataRow["Birth Year"])
 
-    city_input = delete_iframe_element.ele("tag:input@@aria-labelledby=i20 i23")
-    city_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(city_input, dataRow["City"])
+    payload = {
+        _ENTRIES["first"]: first,
+        _ENTRIES["last"]: last,
+        _ENTRIES["type"]: "Data Deletion",
+        _ENTRIES["who"]: "Consumer",
+    }
+    for key, field in (("dob", dob),
+                       ("address", dataRow.get("Address") or ""),
+                       ("city", dataRow.get("City") or ""),
+                       ("state", dataRow.get("State") or "")):
+        if field:
+            payload[_ENTRIES[key]] = field
 
-    state_element = delete_iframe_element.ele("tag:input@@aria-describedby=i25 i28")
-    state_element.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(state_element, dataRow["State"])
+    log_step(broker, "POST google form (data deletion) for %s %s" % (first, last))
+    resp = requests.post(_URL, data=payload, timeout=30, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://docs.google.com/forms/d/e/%s/viewform" % _FORM_ID,
+    })
+    body = resp.text or ""
+    ok = resp.status_code == 200 and (
+        "formResponse" in resp.url or "freebirdFormviewerViewResponse" in body
+        or "Your response has been recorded" in body or "submit another response" in body.lower()
+    )
+    if not ok:
+        raise RuntimeError(
+            "faradayio: google form rejected the submission "
+            "(HTTP %s) — form schema may have changed" % resp.status_code)
 
-def faradayio(dataRow, website_name, in_user_email, run_mode) : 
-    page = None
-    try : 
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-
-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\FaradayIO_" + fName + "-" + lName + ".png"
-        
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            # "--incognito",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
-
-        options = get_chromium_options(arguments).auto_port()
-        options.add_extension("adblock")
-        if run_mode == "headless" :
-            options.headless()
-        #Launch Website
-        page = ChromiumPage(addr_or_opts=options)
-        page.get("https://faraday.ai/privacy-options")
-
-        sleep(3)
-
-        fill_input_data(page, dataRow)
-
-        delete_iframe_element = page.eles("tag:iframe")[0]
-        submit_button = delete_iframe_element.ele("tag:div@@aria-label=Submit")
-        submit_button.click()
-
-        try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
-        
-    except Exception as e:
-        try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
-        raise
-
-    finally:
-        if page is not None:
-            try:
-                page.quit()
-            except Exception:
-                pass
-
-    return screenshot_save_path
+    # No browser, so no screenshot — persist the acceptance page instead so
+    # the evidence chain has a real artifact.
+    out_dir = os.path.join(os.getcwd(), "ScreenShot",
+                           datetime.datetime.now().strftime("%Y-%m-%d"))
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "FaradayIo_%s-%s.html" % (first, last))
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        log_step(broker, "submitted, receipt saved")
+        return path
+    except OSError:
+        log_step(broker, "submitted (receipt not saved)")
+        return None

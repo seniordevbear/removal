@@ -1,179 +1,92 @@
-from DrissionPage import ChromiumPage, ChromiumOptions
+from lib.broker_helpers import (
+    safe_chromium_for_broker, find_input, screenshot_step, log_step,
+    state_abbrev,
+)
+from lib.captcha import get_solver
 from time import sleep
-import json
-import random
-import os, datetime, pyautogui, requests
-from lib.common import generate_email, generate_phone_number
-from twocaptcha import TwoCaptcha
-
-now = datetime.datetime.now()
-current_date = now.strftime("%Y-%m-%d")
-base_dir = os.getcwd()
-
-screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
-os.makedirs(screentShotDir, exist_ok=True)
-
-def get_chromium_options(arguments: list) -> ChromiumOptions:
-    """
-    Configures and returns Chromium options.
-    
-    :param browser_path: Path to the Chromium browser executable.
-    :param arguments: List of arguments for the Chromium browser.
-    :return: Configured ChromiumOptions instance.
-    """
-    options = ChromiumOptions()
-    # options.no_imgs(True)
-    # options.no_imgs(True).mute(True).no_js(True)
-    # options.set_argument('--auto-open-devtools-for-tabs', 'true') # we don't need this anymore
-    for argument in arguments:
-        options.set_argument(argument)
-    return options
-
-def _human_type2(element , text: str) -> None:
-    """
-    Types in a way reminiscent of a human, with a random delay in between 50ms to 100ms for every character
-    :param element: Input element to type text to
-    :param text: Input to be typed
-    """
-
-    for c in text:
-        element.input(c)
-
-        sleep(random.uniform(0.05, 0.1))
+import json as _json
+import re as _re
 
 
-def fill_input_data(page, dataRow) : 
-    
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+# Rewritten 2026-08-23 from the live form (user-supplied HTML). Vue/Inertia
+# app at optout.audienceacuity.com: typed fields (real key events keep Vue's
+# state in sync), state select uses two-letter VALUES, both suppression
+# checkboxes, and a Google reCAPTCHA v2 whose sitekey only exists at runtime
+# in the widget iframe URL.
+def audienceacuitycom(dataRow, website_name, in_user_email, run_mode):
+    broker = "audienceacuitycom"
+    name_full = (dataRow.get("Name") or "").strip()
+    parts = name_full.split()
+    first = parts[0] if parts else ""
+    last = parts[-1] if len(parts) > 1 else ""
+    address = (dataRow.get("Address") or dataRow.get("Street") or "").strip()
+    city = (dataRow.get("City") or "").strip()
+    zipc = (dataRow.get("Zipcode") or "").strip()
+    email = dataRow.get("User Email") or in_user_email
+    if not (first and last and email):
+        raise RuntimeError(broker + ": form requires name and email")
 
-    fName_input = page.ele("tag:input@@id=input_3_1_3")
-    fName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
+    with safe_chromium_for_broker(broker,
+                                  headless=(run_mode == "headless")) as page:
+        try:
+            log_step(broker, "GET https://optout.audienceacuity.com")
+            page.get("https://optout.audienceacuity.com")
+            sleep(4)  # Inertia app boot
 
-    lName_input = page.ele("tag:input@@id=input_3_1_6")
-    lName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
+            for sel, val in (("css:#first_name", first),
+                             ("css:#last_name", last),
+                             ("css:#email", email),
+                             ("css:#street_address", address),
+                             ("css:#city", city),
+                             ("css:#zip_code", zipc)):
+                if not val:
+                    continue
+                el = find_input(page, sel, timeout=8.0)
+                el.click()
+                el.input(val)
+                sleep(0.25)
 
-    email_input = page.ele("tag:input@@id=input_3_2")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
-    
-    address_input = page.ele("tag:input@@id=input_3_3_1")
-    address_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
-
-    street_input = page.ele("tag:input@@id=input_3_3_2")
-    street_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(street_input, dataRow["Street"])
-
-
-    city_input = page.ele("tag:input@@id=input_3_3_3")
-    city_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(city_input, dataRow["City"])
-
-    state_element = page.ele("tag:select@@id=input_3_3_4")
-    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_element, dataRow["State"])
-
-    zip_input = page.ele("tag:input@@id=input_3_3_5")
-    zip_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
-
-    checkbox_element = page.ele("tag:input@@id=choice_3_4_1")
-    checkbox_element.set.attr("checked", True)
-
-def audienceacuitycom(dataRow, website_name, in_user_email, run_mode) : 
-    page = None
-    try : 
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-
-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\AudienceacuityCom_" + fName + "-" + lName + ".png"
-        
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
-
-        options = get_chromium_options(arguments).auto_port().add_extension("adblock")
-        if run_mode == "headless" :
-            options.headless()
-        #Launch Website
-        page = ChromiumPage(addr_or_opts=options)
-        page.get("https://audienceacuity.com/opt-out-of-database/")
-
-        fill_input_data(page, dataRow)
-
-        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
-        solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            site_key = "6Le5KJkeAAAAAPS0BrWxK6IYE9GgqmoOtVRM92CW"
-            site_url = "https://audienceacuity.com/opt-out-of-database/"
-            result = solver.recaptcha(site_key, site_url)
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            print("Error: ", str(e))
-
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        print(iframe_container)
-        recaptcha_input_token = iframe_container.ele("tag:input@@id=recaptcha-token")
-        recaptcha_input_token.set.attr("value", Code)
-
-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
-        print(textarea_token)
-        textarea_token.set.innerHTML(Code)
-
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        recaptcha_input_token1 = iframe_container1.ele("tag:input@@id=recaptcha-token")
-        print(recaptcha_input_token1)
-        recaptcha_input_token1.set.attr("value", Code)
-
-        form_container = page.ele("tag:form@@id=gform_3")
-        form_container.run_js("this.submit();")
-
-        sleep(1)
-
-        try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
-        
-    except Exception as e:
-        try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
-        raise
-
-    finally:
-        if page is not None:
             try:
-                page.quit()
+                page.ele("css:#state", timeout=5).select.by_value(
+                    state_abbrev(dataRow.get("State") or ""))
+            except Exception as e:
+                log_step(broker, "state select skipped: " + str(e))
+            sleep(0.3)
+
+            for cb in ("css:#individual_level", "css:#household_level"):
+                el = page.ele(cb, timeout=5)
+                try:
+                    el.click()
+                except Exception:
+                    el.click(by_js=True)
+                sleep(0.2)
+
+            # sitekey lives only in the rendered widget iframe URL (k=...)
+            frame = page.ele("css:iframe[src*='recaptcha']", timeout=10)
+            m = _re.search(r"[?&]k=([\w-]+)", frame.attr("src") or "")
+            if not m:
+                raise RuntimeError(broker + ": recaptcha sitekey not found")
+            sitekey = m.group(1)
+            log_step(broker, "solving recaptcha " + sitekey)
+            token = get_solver().recaptcha(sitekey=sitekey, url=page.url)["code"]
+            page.run_js(
+                "var t=document.querySelector('textarea[name=\"g-recaptcha-response\"]');"
+                "if(!t){t=document.createElement('textarea');"
+                "t.name='g-recaptcha-response';t.style.display='none';"
+                "document.querySelector('form').appendChild(t);}"
+                "t.value=" + _json.dumps(token) + ";"
+                "if(window.grecaptcha){window.grecaptcha.getResponse="
+                "function(){return " + _json.dumps(token) + ";};}")
+
+            shot = screenshot_step(page, broker, "before_submit")
+            find_input(page, "css:button[type=submit]", timeout=6.0).click()
+            sleep(6)
+            shot = screenshot_step(page, broker, "after_submit") or shot
+            log_step(broker, "submitted")
+            return shot
+        except Exception:
+            try:
+                screenshot_step(page, broker, "error")
             except Exception:
                 pass
-
-    return screenshot_save_path
+            raise

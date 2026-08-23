@@ -1,134 +1,150 @@
-from DrissionPage import ChromiumPage, ChromiumOptions
+from lib.broker_helpers import (
+    safe_chromium_for_broker, find_input, screenshot_step, log_step,
+    _state_full_name,
+)
+from lib.captcha import get_solver
 from time import sleep
-import json
-import random
-import os, datetime, pyautogui, requests
-from lib.common import generate_email, generate_phone_number
-
-now = datetime.datetime.now()
-current_date = now.strftime("%Y-%m-%d")
-base_dir = os.getcwd()
-
-screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
-os.makedirs(screentShotDir, exist_ok=True)
-
-usaStateDictionary = { 'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'District of Columbia': 'DC', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY' }
-def get_chromium_options(arguments: list) -> ChromiumOptions:
-    """
-    Configures and returns Chromium options.
-    
-    :param browser_path: Path to the Chromium browser executable.
-    :param arguments: List of arguments for the Chromium browser.
-    :return: Configured ChromiumOptions instance.
-    """
-    options = ChromiumOptions()
-    # options.no_imgs(True)
-    # options.no_imgs(True).mute(True).no_js(True)
-    # options.set_argument('--auto-open-devtools-for-tabs', 'true') # we don't need this anymore
-    for argument in arguments:
-        options.set_argument(argument)
-    return options
-
-def _human_type2(element , text: str) -> None:
-    """
-    Types in a way reminiscent of a human, with a random delay in between 50ms to 100ms for every character
-    :param element: Input element to type text to
-    :param text: Input to be typed
-    """
-
-    for c in text:
-        element.input(c)
-
-        sleep(random.uniform(0.05, 0.1))
-
-def fill_input_data(page, dataRow) : 
-
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-
-    main_container = page.ele("tag:main@@id=main")
-    iframe_container = main_container.ele("tag:iframe")
+import json as _json
 
 
-    fullName_input = iframe_container.ele("tag:input@@aria-labelledby:QuestionId_r47678b1f34d04d699d6cd8f9fa26d53a")
-    fullName_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fullName_input, dataRow["Name"])
+# Rewritten 2026-08-23 from the live form (user-supplied HTML). PrivateEye's
+# opt-out is GoDaddy's OneTrust DSAR portal (Angular): first a subject-type
+# chooser rendered as custom divs (role=option, aria-label "Customer"/
+# "Other"), which then reveals the actual fields using OneTrust's standard
+# <name>DSARElement ids. reCAPTCHA v2 with OneTrust's shared sitekey; the
+# Submit button stays disabled until Angular counts the form valid, so every
+# value is entered with real key events.
+def privateeyecom(dataRow, website_name, in_user_email, run_mode):
+    broker = "privateeyecom"
+    name_full = (dataRow.get("Name") or "").strip()
+    parts = name_full.split()
+    first = parts[0] if parts else ""
+    last = parts[-1] if len(parts) > 1 else ""
+    email = dataRow.get("User Email") or in_user_email
+    if not (first and last and email):
+        raise RuntimeError(broker + ": requires name and email")
 
-    email_input = iframe_container.ele("tag:input@@aria-labelledby:QuestionId_rb1fe2e924a464227ad116e8cf99055b3")
-    email_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
+    with safe_chromium_for_broker(broker,
+                                  headless=(run_mode == "headless")) as page:
+        try:
+            log_step(broker, "GET https://www.godaddy.com/legal/agreements/do-not-share")
+            page.get("https://www.godaddy.com/legal/agreements/do-not-share")
+            sleep(4)
 
-    country_input = iframe_container.ele("tag:input@@aria-labelledby:QuestionId_r8c5609294b4c431e819456b6f02d6c29")
-    country_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(country_input, "United States")
+            # the DSAR webform may itself sit in an iframe on the godaddy page
+            scope = page
+            fr = page.ele("css:iframe[src*='privacyportal.onetrust.com']",
+                          timeout=5)
+            if fr:
+                scope = page.get_frame(fr)
+                sleep(1)
 
-    state_city = dataRow["State"] + "/" + dataRow["City"]
-    state_city_input = iframe_container.ele("tag:input@@aria-labelledby:QuestionId_r1f6f253e21034183bf9b72e08abd3d04")
-    state_city_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(state_city_input, state_city)
-
-    submit_button = iframe_container.ele("tag:button@@data-automation-id=submitButton")
-    submit_button.click()
-    
-def privateeyecom(dataRow, website_name, in_user_email, run_mode) : 
-    page = None
-    try : 
-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\PrivateEyeCom_" + fName + "-" + lName + ".png"
-        
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-
-
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            # "--incognito",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
-
-        options = get_chromium_options(arguments).auto_port()
-        if run_mode == "headless" : 
-            options.headless()
-        #Launch Website
-        page = ChromiumPage(addr_or_opts=options)
-        page.get("https://www.godaddy.com/legal/agreements/do-not-share")
-
-        sleep(5)
-
-        fill_input_data(page, dataRow)
-
-        
-        try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
-        
-    except Exception as e:
-        try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
-        raise
-
-    finally:
-        if page is not None:
+            # subject type: "Other" fits a data-subject who is not a GoDaddy
+            # customer; fall back to "Customer" if the option set changed.
+            opt = None
+            for label in ("Other", "Customer"):
+                opt = scope.ele("css:div[role=option][aria-label='%s']" % label,
+                                timeout=4)
+                if opt:
+                    break
+            if not opt:
+                raise RuntimeError(broker + ": subject-type options not found")
             try:
-                page.quit()
+                opt.click()
+            except Exception:
+                opt.click(by_js=True)
+            sleep(2)  # Angular reveals the real fields
+
+            def fill(frag, value, required=False):
+                if not value:
+                    return
+                el = None
+                for sel in ("css:input[id*='%s' i][id$='DSARElement']" % frag,
+                            "css:input[id*='%s' i]" % frag):
+                    el = scope.ele(sel, timeout=4)
+                    if el:
+                        break
+                if not el:
+                    if required:
+                        raise RuntimeError(broker + ": field not found: " + frag)
+                    log_step(broker, frag + " field absent, skipped")
+                    return
+                el.click()
+                el.input(value)
+                sleep(0.3)
+
+            fill("firstName", first, required=True)
+            fill("lastName", last, required=True)
+            fill("email", email, required=True)
+            fill("phone", (dataRow.get("Phone Number") or "").strip())
+            fill("address", (dataRow.get("Address") or "").strip())
+            fill("city", (dataRow.get("City") or "").strip())
+            fill("zip", (dataRow.get("Zipcode") or "").strip())
+            fill("postal", (dataRow.get("Zipcode") or "").strip())
+
+            # state, if the revealed form has OneTrust's dropdown
+            st = scope.ele("css:input[id*='state' i][id$='DSARElement']",
+                           timeout=3)
+            if st:
+                try:
+                    st.click()
+                    sleep(0.5)
+                    raw = (dataRow.get("State") or "").strip()
+                    for cand in (_state_full_name(raw), raw, raw.upper()):
+                        o = scope.ele(
+                            "tag:vt-option@@aria-label=" + cand, timeout=2)
+                        if o:
+                            o.click()
+                            break
+                except Exception as e:
+                    log_step(broker, "state select skipped: " + str(e))
+
+            # request-type toggles, if present after reveal: prefer deletion
+            for needle in ("delete", "do not sell", "do-not-sell", "opt out"):
+                t = scope.ele(
+                    "css:div[role=option][aria-label*='%s' i]" % needle,
+                    timeout=2)
+                if t:
+                    try:
+                        t.click()
+                    except Exception:
+                        t.click(by_js=True)
+                    sleep(0.4)
+                    break
+
+            frame = scope.ele("css:iframe[src*='recaptcha']", timeout=8)
+            import re as _re
+            m = _re.search(r"[?&]k=([\w-]+)", frame.attr("src") or "")
+            if not m:
+                raise RuntimeError(broker + ": recaptcha sitekey not found")
+            log_step(broker, "solving recaptcha " + m.group(1))
+            token = get_solver().recaptcha(sitekey=m.group(1), url=page.url)["code"]
+            scope.run_js(
+                "var t=document.getElementById('g-recaptcha-response');"
+                "if(t){t.value=" + _json.dumps(token) + ";}"
+                "if(window.grecaptcha){window.grecaptcha.getResponse="
+                "function(){return " + _json.dumps(token) + ";};}")
+            sleep(1)
+
+            shot = screenshot_step(page, broker, "before_submit")
+            btn = scope.ele("css:#dsar-webform-submit-button", timeout=6)
+            if not btn:
+                raise RuntimeError(broker + ": submit button not found")
+            if (btn.attr("disabled") or "").lower() in ("true", "disabled", ""):
+                # still disabled -> a required field Angular wants is missing;
+                # try a JS click anyway, then verify below via screenshot
+                log_step(broker, "submit still disabled — attempting js click")
+            try:
+                btn.click()
+            except Exception:
+                btn.click(by_js=True)
+            sleep(6)
+            shot = screenshot_step(page, broker, "after_submit") or shot
+            log_step(broker, "submitted")
+            return shot
+        except Exception:
+            try:
+                screenshot_step(page, broker, "error")
             except Exception:
                 pass
-
-    return screenshot_save_path
+            raise
