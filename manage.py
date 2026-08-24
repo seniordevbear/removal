@@ -1026,6 +1026,70 @@ def _requeue_fixed_domains():
                 pass
 
 
+def _probe_dead_domains():
+    """One row per dead broker per day, at the FRONT of the queue.
+
+    Selection reads each customer's rows in id order, so a domain's freshly
+    created pending rows (high ids) can sit days behind hundreds of older
+    rows — observed 2026-08-23: six rewritten brokers had waited 19h with
+    zero attempts. The proven-fix retry can't help either: it needs a first
+    success, which never comes if nothing gets attempted.
+
+    So: for up to 20 domains per pass that have failures but NO success in
+    the last 7 days, requeue the single OLDEST failed row (lowest id — the
+    front of its owner's line). At most one probe per domain per day
+    ($.probe_at). A repaired script turns its probe into the success that
+    fires the full cascade; a still-broken one costs one attempt per day."""
+    conn = None
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE results r "
+                "SET r.step = 0, "
+                "    r.data = JSON_SET(COALESCE(r.data, '{}'), "
+                "        '$.probe_at', CAST(CURDATE() AS CHAR)) "
+                "WHERE r.id IN (SELECT id FROM ("
+                "    SELECT MIN(r2.id) AS id "
+                "    FROM results r2 JOIN users u ON u.id = r2.user_id "
+                "    WHERE r2.kind = 1 AND r2.step = 3 "
+                # one probe per DOMAIN per day: if any row of this domain
+                # already carries today's probe stamp, the domain is done
+                # for today (a per-row check would probe the domain's rows
+                # one after another all day).
+                "      AND NOT EXISTS (SELECT 1 FROM results p "
+                "          WHERE p.target_domain = r2.target_domain "
+                "            AND p.kind = 1 "
+                "            AND p.data->>'$.probe_at' "
+                "                = CAST(CURDATE() AS CHAR)) "
+                + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
+                   "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
+                   if REMOVAL_PAID_USERS_ONLY else "") +
+                "      AND NOT EXISTS (SELECT 1 FROM results s "
+                "          WHERE s.target_domain = r2.target_domain "
+                "            AND s.kind = 1 AND s.step = 2 "
+                "            AND s.updated_at > NOW() - INTERVAL 7 DAY) "
+                "    GROUP BY r2.target_domain "
+                "    ORDER BY COUNT(*) DESC "
+                "    LIMIT 20) x)"
+            )
+            n = cur.rowcount
+            conn.commit()
+            if n:
+                log.info("dead-domain probe: front-queued %d probe row(s)", n)
+        finally:
+            cur.close()
+    except Exception:
+        log.exception("dead-domain probe failed")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def maintenance_loop():
     """Worker 1 (the historically reserved slot): housekeeping.
 
@@ -1042,6 +1106,7 @@ def maintenance_loop():
         _refresh_stale_row_pii()
         _requeue_recovered_pii()
         _requeue_fixed_domains()
+        _probe_dead_domains()
 
 
 # The only two brokers that drive the real desktop mouse/keyboard via
