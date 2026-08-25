@@ -2,6 +2,7 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 from time import sleep
 import json
 import random
+from lib.broker_helpers import _state_full_name
 import os, datetime, pyautogui, requests, sys
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
@@ -87,10 +88,25 @@ def fill_input_data(page, dataRow) :
     sleep(random.uniform(0.1,0.5))
     page.ele("tag:vt-option@@text()= United States ").click()
     
-    state_select = page.ele("tag:input@@id=stateDSARElement")
-    state_select.click()
-    sleep(random.uniform(0.1,0.5))
-    page.ele(f"tag:vt-option@@text()= {dataRow["State"]} ").click()
+    # OneTrust dropdown lists FULL state names ("Texas") while profiles hold
+    # "TX" (and empty for non-US customers). Empty crashed the old line with
+    # "text()=  "; a code/name mismatch crashed it too. Guard + try both.
+    _raw_state = (dataRow.get("State") or "").strip()
+    if _raw_state:
+        state_select = page.ele("tag:input@@id=stateDSARElement")
+        state_select.click()
+        sleep(random.uniform(0.1,0.5))
+        for _cand in (_state_full_name(_raw_state), _raw_state, _raw_state.upper()):
+            if not _cand:
+                continue
+            _opt = page.ele(f"tag:vt-option@@text()= {_cand} ", timeout=3)
+            if _opt:
+                _opt.click()
+                break
+        else:
+            print(f"gumgum: state option not found for {_raw_state!r}, continuing")
+    else:
+        print("gumgum: no state on file, skipping state field")
 
     detail_input = page.ele("tag:textarea@@id=requestDetailsDSARElement")
     detail_input.click()

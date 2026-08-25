@@ -46,6 +46,10 @@ def _human_type2(element , text: str) -> None:
         sleep(random.uniform(0.05, 0.1))
 
 def trustoriacom(dataRow, website_name, in_user_email, run_mode) : 
+    # Site defunct — surveyed 2026-08-25. Raising NotImplementedError
+    # sends the row to step=4 (not available), which the pipeline does
+    # NOT retry, instead of crashing on a missing form every cycle.
+    raise NotImplementedError("trustoria.com is offline/defunct as of 2026-08-25")
     page = None
     try : 
         

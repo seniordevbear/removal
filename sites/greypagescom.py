@@ -75,6 +75,10 @@ def fill_input_data(page, dataRow) :
     submit_button.click()
     
 def greypagescom(dataRow, website_name, in_user_email, run_mode) : 
+    # Site defunct — surveyed 2026-08-25. Raising NotImplementedError
+    # sends the row to step=4 (not available), which the pipeline does
+    # NOT retry, instead of crashing on a missing form every cycle.
+    raise NotImplementedError("greypages.com is a parked/defunct domain (ad-link page, no opt-out form) as of 2026-08-25")
     page = None
     try : 
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
