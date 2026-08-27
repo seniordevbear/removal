@@ -53,6 +53,11 @@ def make_standard_num(num) :
     return ret
 
 def vericoracom(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct — surveyed 2026-08-27. vericora.com no longer serves a
+    # data-broker opt-out; the domain now shows an unrelated business
+    # (VeriCore debt collections). NotImplementedError -> step=4
+    # (not available), which the pipeline does not retry.
+    raise NotImplementedError("vericora.com is defunct / no opt-out (2026-08-27)")
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name

@@ -1,172 +1,106 @@
-from DrissionPage import ChromiumPage, ChromiumOptions
+from lib.broker_helpers import (
+    safe_chromium_for_broker, find_input, screenshot_step, log_step,
+    _state_full_name,
+)
+from lib.common import generate_email
 from time import sleep
-import json
-import random
-import os, datetime, pyautogui, requests
-from lib.common import generate_email, generate_phone_number
-from fake_useragent import UserAgent
-from lib.email_verification import do_email_verification
-
-now = datetime.datetime.now()
-current_date = now.strftime("%Y-%m-%d")
-base_dir = os.getcwd()
-
-screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
-os.makedirs(screentShotDir, exist_ok=True)
-
-usaStateDictionary_1 = { 'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CCPA', 'Colorado': 'CPA', 'Connecticut': 'CTDPA', 'Delaware': 'DPDPA', 'District of Columbia': 'DC', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'ICDPA', 'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO', 'Montana': 'MCDPA', 'Nebraska': 'NDPA', 'Nevada': 'NV', 'New Hampshire': 'NHPA', 'New Jersey': 'NJDPA', 'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OCPA', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TDPSA', 'Utah': 'UTCPA', 'Vermont': 'VT', 'Virginia': 'VCDPA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY' }
-
-def get_chromium_options(arguments: list) -> ChromiumOptions:
-    """
-    Configures and returns Chromium options.
-    
-    :param browser_path: Path to the Chromium browser executable.
-    :param arguments: List of arguments for the Chromium browser.
-    :return: Configured ChromiumOptions instance.
-    """
-    options = ChromiumOptions()
-    # options.no_imgs(True)
-    # options.no_imgs(True).mute(True).no_js(True)
-    # options.set_argument('--auto-open-devtools-for-tabs', 'true') # we don't need this anymore
-    for argument in arguments:
-        options.set_argument(argument)
-
-    options.set_user_agent(UserAgent().random)
-    return options
-
-def _human_type2(element , text: str) -> None:
-    """
-    Types in a way reminiscent of a human, with a random delay in between 50ms to 100ms for every character
-    :param element: Input element to type text to
-    :param text: Input to be typed
-    """
-
-    for c in text:
-        element.input(c)
-
-        sleep(random.uniform(0.05, 0.1))
-
-def make_standard_num(num) :
-    ret = str(num)
-    if len(ret) < 2 : ret = "0" + ret
-
-    return ret
-
-def fill_input_data(page, dataRow) : 
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-
-    fName_input = page.ele("tag:input@@name=firstName")
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
-
-    sleep(1)
-    lName_input = page.ele("tag:input@@name=lastName")
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    sleep(1)
-    email_input = page.ele("tag:input@@name=email")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
-
-    sleep(1)
-    country_select = page.ele("tag:select@@name=country")
-    country_select.select.by_text("United States")
-
-    sleep(1)
-    state_city = dataRow["State"] + " / " + dataRow["City"]
-    state_city_input = page.ele("tag:input@@name=stateRegion")
-    state_city_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(state_city_input, state_city)
-
-    sleep(1)
-
-    request_man = page.ele("tag:select@@name=typeCode")
-    request_man.select.by_text("Customer")
-    sleep(1)
+import logging
 
 
-def insideviewcom(dataRow, website_name, in_user_email, run_mode) : 
-    page = None
-    try : 
-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\InsideviewCom_" + fName + "-" + lName + ".png"
-        
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
+# Rewritten 2026-08-25 from the live form (user-supplied HTML). InsideView is
+# now Demandbase; the opt-out is a Ketch privacy-center SPA. The deletion form
+# is revealed after choosing the "Data Deletion" request type, then exposes
+# stable ids: #text-field-firstName/-lastName/-email, #select-field-country
+# (2-letter values), #text-field-stateRegion (free text), #select-field-typeCode
+# ("customer"). Invisible reCAPTCHA guards submit, so this is best-effort — a
+# failed run leaves an error screenshot for the next iteration.
+def insideviewcom(dataRow, website_name, in_user_email, run_mode):
+    broker = "insideviewcom"
+    name_full = (dataRow.get("Name") or "").strip()
+    parts = name_full.split()
+    first = parts[0] if parts else ""
+    last = parts[-1] if len(parts) > 1 else ""
+    if not first or not last:
+        raise RuntimeError(broker + ": form requires first and last name")
+    state = _state_full_name(dataRow.get("State") or "") or (dataRow.get("State") or "")
 
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            # "--incognito",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
+    url = ("https://www.demandbase.com/privacy-center.html"
+           "?ketch_preferences_tab=rightsTab")
+    with safe_chromium_for_broker(broker,
+                                  headless=(run_mode == "headless")) as page:
+        try:
+            log_step(broker, "GET " + url)
+            page.get(url)
+            sleep(5)  # Ketch SPA boot
 
-        options = get_chromium_options(arguments).auto_port()
+            # Reveal the request form by choosing a deletion-type option.
+            # The chooser markup isn't fixed, so try a few text-based handles.
+            for sel in ("xpath://*[contains(translate(., 'DELETE', 'delete'),"
+                        " 'delete')][not(self::script)]",
+                        "xpath://*[contains(., 'Data Deletion')]",
+                        "css:[data-role='right-tile']"):
+                try:
+                    el = page.ele(sel, timeout=4)
+                    if el:
+                        try:
+                            el.click()
+                        except Exception:
+                            el.click(by_js=True)
+                        sleep(2)
+                        break
+                except Exception:
+                    pass
 
-        if run_mode == "headless" :
-            options.headless()
+            # The form fields have stable ids once the form is shown.
+            fn = find_input(page, "css:#text-field-firstName", timeout=10.0)
+            fn.click(); fn.input(first); sleep(0.2)
+            find_input(page, "css:#text-field-lastName").input(last); sleep(0.2)
+            find_input(page, "css:#text-field-email").input(
+                generate_email(name_full)); sleep(0.2)
 
-        #Launch Website
-        page = ChromiumPage()
-        page.get("https://www.demandbase.com/privacy-center.html?ketch_preferences_tab=rightsTab")
-
-        sleep(random.uniform(1, 2))
-        
-        page.wait.ele_displayed("tag:button@@text()=Data Deletion")
-        sleep(1)
-        delete_button = page.ele("tag:button@@text()=Data Deletion")
-        print(delete_button)
-        delete_button.run_js("this.click()")
-
-        sleep(1)
-
-        fill_input_data(page, dataRow)
-
-        sleep(7)
-        submit_button = page.ele("tag:button@@text()=Submit")
-        submit_button.run_js("this.click()")
-
-        sleep(1)
-
-        
-        try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
-        
-    
-    except Exception as e:
-        try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
-        raise
-
-    finally:
-        if page is not None:
             try:
-                page.quit()
+                page.ele("css:#select-field-country", timeout=4).select.by_value("US")
+            except Exception:
+                log_step(broker, "country select skipped", logging.WARNING)
+            sleep(0.2)
+
+            try:
+                find_input(page, "css:#text-field-stateRegion").input(state)
             except Exception:
                 pass
+            sleep(0.2)
 
-    return screenshot_save_path
-    
+            try:
+                page.ele("css:#select-field-typeCode", timeout=4).select.by_value("customer")
+            except Exception:
+                log_step(broker, "typeCode select skipped", logging.WARNING)
+            sleep(0.3)
+
+            shot = screenshot_step(page, broker, "before_submit")
+
+            btn = find_input(page, "css:#right-invocation-form button[type=submit]",
+                             "css:button[type=submit]", timeout=6.0)
+            try:
+                btn.click()
+            except Exception:
+                btn.click(by_js=True)
+            sleep(6)
+
+            # Confirmation copy or a thank-you replaces the form on success.
+            html = (page.html or "").lower()
+            if ("thank" in html or "received" in html or "confirmation" in html
+                    or "check your email" in html):
+                shot = screenshot_step(page, broker, "after_submit") or shot
+                log_step(broker, "submitted")
+                return shot
+            # No clear confirmation — likely the invisible reCAPTCHA blocked it.
+            screenshot_step(page, broker, "error")
+            raise RuntimeError(
+                broker + ": submitted but no confirmation seen "
+                "(invisible reCAPTCHA may have blocked it)")
+        except Exception:
+            try:
+                screenshot_step(page, broker, "error")
+            except Exception:
+                pass
+            raise
