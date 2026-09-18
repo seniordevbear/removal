@@ -1,171 +1,101 @@
-from DrissionPage import ChromiumPage, ChromiumOptions
-from time import sleep
-import json
-import random
-import os, datetime, pyautogui, requests
+from lib.broker_helpers import (
+    safe_chromium_for_broker, find_input, screenshot_step, log_step, _state_full_name,
+)
 from lib.common import generate_email, generate_phone_number
+from lib.captcha import get_solver
+from time import sleep
+import json as _json
+import re as _re
+import logging
 
-now = datetime.datetime.now()
-current_date = now.strftime("%Y-%m-%d")
-base_dir = os.getcwd()
 
-screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
-os.makedirs(screentShotDir, exist_ok=True)
+# Rewritten 2026-08-29 from the live form. gostrata's opt-out is a Gravity
+# Form (id 5) at /do-not-sell-my-personal-information/: name block
+# (input_5_12_3/_12_6), address block (13_1 street, 13_3 city, 13_4 state
+# SELECT, 13_5 zip), Email (14) + Email confirmation (8), Phone (15,
+# required), a certification checkbox (16_1), and reCAPTCHA v2. The old
+# script targeted input_13.4 as an <input> (it is a <select>) and missed the
+# required phone/confirmation — hence the crash.
+def gostratacom(dataRow, website_name, in_user_email, run_mode):
+    broker = "gostratacom"
+    name_full = (dataRow.get("Name") or "").strip()
+    parts = name_full.split()
+    first = parts[0] if parts else ""
+    last = parts[-1] if len(parts) > 1 else ""
+    if not first or not last:
+        raise RuntimeError(broker + ": requires first and last name")
+    email = generate_email(name_full)
+    phone = (dataRow.get("Phone Number") or "").strip() or generate_phone_number()
+    state_full = _state_full_name(dataRow.get("State") or "")
 
-def get_chromium_options(arguments: list) -> ChromiumOptions:
-    """
-    Configures and returns Chromium options.
-    
-    :param browser_path: Path to the Chromium browser executable.
-    :param arguments: List of arguments for the Chromium browser.
-    :return: Configured ChromiumOptions instance.
-    """
-    options = ChromiumOptions()
-    # options.no_imgs(True)
-    # options.no_imgs(True).mute(True).no_js(True)
-    # options.set_argument('--auto-open-devtools-for-tabs', 'true') # we don't need this anymore
-    for argument in arguments:
-        options.set_argument(argument)
-    return options
+    with safe_chromium_for_broker(broker,
+                                  headless=(run_mode == "headless")) as page:
+        try:
+            log_step(broker, "GET https://www.gostrata.com/do-not-sell-my-personal-information/")
+            page.get("https://www.gostrata.com/do-not-sell-my-personal-information/")
+            sleep(3)
 
-def _human_type2(element , text: str) -> None:
-    """
-    Types in a way reminiscent of a human, with a random delay in between 50ms to 100ms for every character
-    :param element: Input element to type text to
-    :param text: Input to be typed
-    """
+            def fill(sel, val):
+                if not val:
+                    return
+                el = find_input(page, sel, timeout=6.0)
+                el.click(); el.input(val); sleep(0.2)
 
-    for c in text:
-        element.input(c)
+            fill("css:#input_5_12_3", first)
+            fill("css:#input_5_12_6", last)
+            fill("css:#input_5_13_1", (dataRow.get("Address") or dataRow.get("Street") or "").strip())
+            fill("css:#input_5_13_3", (dataRow.get("City") or "").strip())
+            fill("css:#input_5_13_5", (dataRow.get("Zipcode") or "").strip())
+            fill("css:#input_5_14", email)
+            fill("css:#input_5_8", email)       # confirmation must match
+            fill("css:#input_5_15", phone)
 
-        sleep(random.uniform(0.05, 0.1))
+            if state_full:
+                try:
+                    page.ele("css:#input_5_13_4", timeout=4).select.by_text(state_full)
+                except Exception:
+                    try:
+                        page.ele("css:select[name='input_13.4']").select.by_text(state_full)
+                    except Exception as e:
+                        log_step(broker, "state select skipped: " + str(e), logging.WARNING)
+            sleep(0.2)
 
-def make_standard_num(num) :
-    ret = str(num)
-    if len(ret) < 2 : ret = "0" + ret
-
-    return ret
-
-def fill_input_data(page, dataRow) : 
-    
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-
-    page.wait.ele_displayed("tag:form@@id=gform_5")
-
-    sleep(5)
-    form_container = page.ele("tag:form@@id=gform_5")
-    page.wait.ele_displayed("tag:input@@id=input_5_12_3")
-    sleep(1)
-    fName_input = form_container.ele("tag:input@@id=input_5_12_3")
-    print(fName_input)
-    fName_input.run_js("this.click();")
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
-
-    sleep(2)
-
-    lName_input = form_container.ele("tag:input@@name=input_12.6")
-    lName_input.run_js("this.click()")
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    address_input = form_container.ele("tag:input@@name=input_13.1")
-    address_input.run_js("this.click();")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
-
-    city_input = form_container.ele("tag:input@@name=input_13.3")
-    city_input.run_js("this.click();")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(city_input, dataRow["City"])
-
-    state_input = form_container.ele("tag:input@@name=input_13.4")
-    state_input.run_js("this.click();")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(state_input, dataRow["State"])
-
-    zip_input = form_container.ele("tag:input@@name=input_13.5")
-    zip_input.run_js("this.click();")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
-    
-    country_select = form_container.ele("tag:select@@name=input_13.6")
-    country_select.select.by_text("United States")
-
-    email_input = form_container.ele("tag:input@@name=input_8")
-    email_input.run_js("this.click();")
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
-
-    phone_input = form_container.ele("tag:input@@name=input_15")
-    phone_input.run_js("this.click();")
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, generate_phone_number())
-
-    checkbox_element = form_container.ele("tag:input@@name=input_16.1")
-    checkbox_element.run_js("this.click();")
-
-def gostratacom(dataRow, website_name, in_user_email, run_mode) : 
-    page = None
-    try : 
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\GostrataCom_" + fName + "-" + lName + ".png"
-        
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            # "--incognito",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
-
-        options = get_chromium_options(arguments).auto_port()
-        if run_mode == "headless" :
-            options.headless()
-        #Launch Website
-        page = ChromiumPage(options)
-        page.get("https://www.gostrata.com/do-not-sell-my-personal-information/")
-
-        sleep(random.uniform(1, 2))
-
-        fill_input_data(page, dataRow)
-
-        submit_button = page.ele("tag:input@@id=gform_submit_button_5")
-        submit_button.click()
-
-        
-        try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
-        
-    except Exception as e:
-        try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
-        raise
-
-    finally:
-        if page is not None:
+            # certification checkbox
             try:
-                page.quit()
+                cb = page.ele("css:#input_5_16_1", timeout=4)
+                if cb:
+                    try:
+                        cb.click()
+                    except Exception:
+                        cb.click(by_js=True)
             except Exception:
                 pass
+            sleep(0.3)
 
-    return screenshot_save_path
+            # reCAPTCHA v2 — sitekey lives in the widget iframe URL at runtime
+            frame = page.ele("css:iframe[src*='recaptcha']", timeout=10)
+            m = _re.search(r"[?&]k=([\w-]+)", frame.attr("src") or "")
+            if not m:
+                raise RuntimeError(broker + ": recaptcha sitekey not found")
+            log_step(broker, "solving recaptcha " + m.group(1))
+            token = get_solver().recaptcha(sitekey=m.group(1), url=page.url)["code"]
+            page.run_js(
+                "var t=document.getElementById('g-recaptcha-response');"
+                "if(t){t.value=" + _json.dumps(token) + ";}"
+                "document.querySelectorAll('textarea[name=\"g-recaptcha-response\"]')"
+                ".forEach(function(x){x.value=" + _json.dumps(token) + ";});")
+            sleep(0.5)
+
+            shot = screenshot_step(page, broker, "before_submit")
+            find_input(page, "css:#gform_submit_button_5", "css:input[type=submit]",
+                       "css:button[type=submit]", timeout=6).click()
+            sleep(6)
+            shot = screenshot_step(page, broker, "after_submit") or shot
+            log_step(broker, "submitted")
+            return shot
+        except Exception:
+            try:
+                screenshot_step(page, broker, "error")
+            except Exception:
+                pass
+            raise
