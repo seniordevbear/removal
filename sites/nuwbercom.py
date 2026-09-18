@@ -6,6 +6,7 @@ import os, datetime, pyautogui, sys, requests
 from twocaptcha import TwoCaptcha
 from lib.common import generate_email, generate_phone_number
 import re
+from lib.broker_helpers import user_age
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -147,7 +148,7 @@ def nuwbercom(dataRow, website_name, in_user_email, run_mode) :
 
         current_year = now.year
         birth_year = dataRow["Birth Year"]
-        age = current_year - birth_year
+        age = user_age(dataRow)  # int-safe; raises IncompletePII if no birth year/age
 
         if len(people_list) > 0 :
             profile_url = people_list[0].ele("tag:a").attr("href")            

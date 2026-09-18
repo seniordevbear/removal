@@ -110,6 +110,49 @@ logging.getLogger("socketio").setLevel(logging.ERROR)
 logging.getLogger("engineio").setLevel(logging.ERROR)
 log = logging.getLogger("pd.removal")
 
+# ----- environment patches (2026-09-18 log review: 2,340 failures / 85
+# successes in six days, 70% ElementNotFoundError spread evenly over ~110
+# unrelated brokers whose forms were verified unchanged) -------------------
+#
+# 1. PyAutoGUI's fail-safe aborts the run whenever the mouse sits in a screen
+#    corner — which on an unattended RDP box is exactly where it parks after a
+#    session drop (12 crashes every day at ~10:00, like clockwork). It exists
+#    to let a human rescue a runaway script; there is no human here.
+try:
+    import pyautogui as _pyautogui
+    _pyautogui.FAILSAFE = False
+except Exception as _e:  # pyautogui is optional on non-desktop hosts
+    log.warning("pyautogui fail-safe not disabled: %s", _e)
+
+# 2. Every element lookup waited DrissionPage's default 10s. Pages that load
+#    slowly through the proxy (privacy.deepsync.com still had id=first_name
+#    when checked, yet 66 rows "could not find" it) blew that budget, so the
+#    first field lookup of most forms failed identically across the fleet.
+#    Sites build their own ChromiumPage, so the default is raised here for
+#    all of them; a site passing an explicit timeout keeps it. Guarded: if
+#    the installed DrissionPage's constructor differs, the patch stands down.
+try:
+    import inspect as _inspect
+    from DrissionPage import ChromiumPage as _CP
+    _orig_cp_init = _CP.__init__
+    _PD_ELE_TIMEOUT = float(os.getenv("PD_ELEMENT_TIMEOUT", "20"))
+    # Only patch if this DrissionPage's constructor really takes `timeout`
+    # (4.1.0.18: ChromiumPage(addr_or_opts=None, tab_id=None, timeout=None)).
+    # Injecting an unknown kwarg would break EVERY browser launch, so verify
+    # rather than assume.
+    if "timeout" not in _inspect.signature(_orig_cp_init).parameters:
+        raise RuntimeError("ChromiumPage.__init__ has no 'timeout' parameter")
+
+    def _cp_init_with_timeout(self, *a, **kw):
+        if "timeout" not in kw and len(a) < 3:
+            kw["timeout"] = _PD_ELE_TIMEOUT
+        _orig_cp_init(self, *a, **kw)
+
+    _CP.__init__ = _cp_init_with_timeout
+    log.info("DrissionPage element timeout default raised to %ss", _PD_ELE_TIMEOUT)
+except Exception as _e:
+    log.warning("DrissionPage timeout patch skipped (default 10s stays): %s", _e)
+
 
 # ----- mirror print()/traceback output into the log file --------------------
 #

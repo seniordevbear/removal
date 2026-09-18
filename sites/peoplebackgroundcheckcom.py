@@ -54,6 +54,10 @@ def make_standard_num(num) :
     return ret
 
 def peoplebackgroundcheckcom(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct — verified 2026-09-18: domain seized by court order. NotImplementedError -> step=4
+    # (not available), which the pipeline does not retry — same handling as
+    # vericora.com / radaris.com. Original script kept below, unreachable.
+    raise NotImplementedError("peoplebackgroundcheckcom: domain seized by court order (2026-09-18)")
     page = None
     try : 
     

@@ -76,6 +76,10 @@ def fill_input_data(page, dataRow) :
     submit_button.click()
     
 def curadvisorcom(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct — verified 2026-09-18: domain hijacked, now redirects to a gambling site. NotImplementedError -> step=4
+    # (not available), which the pipeline does not retry — same handling as
+    # vericora.com / radaris.com. Original script kept below, unreachable.
+    raise NotImplementedError("curadvisorcom: domain hijacked, now redirects to a gambling site (2026-09-18)")
     page = None
     try : 
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"

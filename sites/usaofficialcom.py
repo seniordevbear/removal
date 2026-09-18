@@ -44,7 +44,7 @@ def _human_type2(element , text: str) -> None:
 
 def make_standard_num(num) :
     ret = str(num)
-    if num < 10 : ret = "0" + ret
+    if len(ret) < 2 : ret = "0" + ret
 
     return ret
 

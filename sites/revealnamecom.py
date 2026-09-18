@@ -75,6 +75,10 @@ def fill_input_data(page, dataRow) :
     submit_button.click()
     
 def revealnamecom(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct — verified 2026-09-18: site shut down ('Domain Update' page, no search or opt-out). NotImplementedError -> step=4
+    # (not available), which the pipeline does not retry — same handling as
+    # vericora.com / radaris.com. Original script kept below, unreachable.
+    raise NotImplementedError("revealnamecom: site shut down ('Domain Update' page, no search or opt-out) (2026-09-18)")
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name

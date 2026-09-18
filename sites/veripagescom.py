@@ -6,6 +6,7 @@ import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
 import re
 from twocaptcha import TwoCaptcha
+from lib.broker_helpers import user_age
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -91,7 +92,7 @@ def veripagescom(dataRow, website_name, in_user_email, run_mode) :
         sleep(5)
         current_year = now.year
         birth_year = dataRow["Birth Year"]
-        age = current_year - birth_year
+        age = user_age(dataRow)  # int-safe; raises IncompletePII if no birth year/age
         print(age)
 
         rows = page.eles("tag:div@@class=search-item")

@@ -75,6 +75,10 @@ def fill_input_data(page, dataRow) :
     submit_button.click()
     
 def verispycom(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct — verified 2026-09-18: domain seized by court order. NotImplementedError -> step=4
+    # (not available), which the pipeline does not retry — same handling as
+    # vericora.com / radaris.com. Original script kept below, unreachable.
+    raise NotImplementedError("verispycom: domain seized by court order (2026-09-18)")
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name

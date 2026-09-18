@@ -454,6 +454,38 @@ def _broker_to_request_portal_url(broker_name):
 _US_STATE_ABBREV = {v: k for k, v in _US_STATE_FULL.items()}
 
 
+def missing_pii(*fields):
+    """Build the IncompletePII exception for a profile that lacks `fields`.
+
+    manage.py maps IncompletePII -> step=5 ("needs user data") and does NOT
+    retry, whereas a ValueError is treated as a broker crash: requeued up
+    to the daily crash budget and then step=3 "failed". Before 2026-09-18
+    an empty State produced 105 such bogus failures in six days. Imported
+    lazily because __removal imports the sites which import this module.
+    """
+    from __removal import IncompletePII
+    return IncompletePII(list(fields))
+
+
+def user_age(dataRow):
+    """Age as an int, from Birth Year (preferred) or the profile's Age.
+
+    Six scripts did `current_year - dataRow["Birth Year"]` and crashed with
+    "unsupported operand type(s) for -: 'int' and 'str'" — dataRow values are
+    always strings, and 42 other scripts concatenate Birth fields as strings,
+    so the fix has to live here, not in the data row. A profile with neither
+    value is missing PII, not a broker failure.
+    """
+    import datetime as _dt
+    by = str(dataRow.get("Birth Year") or "").strip()
+    if by.isdigit():
+        return _dt.datetime.now().year - int(by)
+    age = str(dataRow.get("Age") or "").strip()
+    if age.isdigit():
+        return int(age)
+    raise missing_pii("Birth Year")
+
+
 def state_abbrev(raw):
     """Two-letter state code from whatever the profile holds.
 
@@ -466,7 +498,7 @@ def state_abbrev(raw):
     """
     raw = (raw or "").strip()
     if not raw:
-        raise ValueError("user state is empty; broker form requires it")
+        raise missing_pii("State")  # step=5, not a retried crash — see missing_pii()
     if len(raw) == 2 and raw.upper() in _US_STATE_FULL:
         return raw.upper()
     ab = _US_STATE_ABBREV.get(raw.title())
@@ -486,7 +518,7 @@ def select_state(select_ele, raw, timeout=4.0):
     Tries text and value for both spellings before giving up loudly."""
     raw = (raw or "").strip()
     if not raw:
-        raise ValueError("state is empty for this user")
+        raise missing_pii("State")  # see missing_pii()
     cands = [raw]
     full = _state_full_name(raw)
     if full not in cands:
@@ -573,7 +605,13 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
                 return False
 
             found = False
-            for path in ("/privacy-request-portal", "/optout/", "/request-portal"):
+            # 2026-09-18: the *arrests.org network moved its WPForms opt-out to
+            # /the-privacy-request-portal/ (linked from every state site's
+            # footer); the old path 404s. That single change produced ~230
+            # "no opt-out form" failures across 12+ state sites in a week.
+            # Current path first, legacy ones kept for stragglers.
+            for path in ("/the-privacy-request-portal/", "/privacy-request-portal",
+                         "/optout/", "/request-portal"):
                 url = base + path
                 log_step(broker_name, "GET " + url)
                 page.get(url)
@@ -591,8 +629,9 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
                 screenshot_path = screenshot_step(page, broker_name, "no_form")
                 raise RuntimeError(
                     broker_name + ": no opt-out form at any known path "
-                    "(/privacy-request-portal, /optout/, /request-portal) — "
-                    "site layout changed, script needs a survey")
+                    "(/the-privacy-request-portal/, /privacy-request-portal, "
+                    "/optout/, /request-portal) — site layout changed, "
+                    "script needs a survey")
 
             # -- consent toggles: WPForms uses checkboxes, older layouts used
             #    radios. Try both input types for each concept; missing is a

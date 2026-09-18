@@ -44,6 +44,10 @@ def _human_type2(element , text: str) -> None:
         sleep(random.uniform(0.05, 0.1))
 
 def counciloncom(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct — verified 2026-09-18: site shut down ('Domain Update' page, no search or opt-out). NotImplementedError -> step=4
+    # (not available), which the pipeline does not retry — same handling as
+    # vericora.com / radaris.com. Original script kept below, unreachable.
+    raise NotImplementedError("counciloncom: site shut down ('Domain Update' page, no search or opt-out) (2026-09-18)")
     page = None
     try : 
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
