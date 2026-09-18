@@ -15,16 +15,13 @@ os.makedirs(screentShotDir, exist_ok=True)
 def addressescom(dataRow, website_name, in_user_email, run_mode) :
     page = ChromiumPage()
     try:
-        state = dataRow["State"]
-        print(state.capitalize())
-        if state.capitalize() in usaStateDictionary :
-            state = usaStateDictionary[state.capitalize()].lower()
-        else :
-            state = "ny"
+        # state_code() accepts "TX" or "Texas"; "" when unknown. The old code
+        # fell back to "ny" for any two-letter code (2026-09-19 fix).
+        state = state_code(dataRow.get("State"))
         fName = (dataRow["Name"].split()[0]).lower() # split string based on space to get first name
         lName = (dataRow["Name"].split()[-1]).lower()# split string based on space to get last name
         screenshot_save_path = screentShotDir + "\\AddressesCom_" + fName + "-" + lName + ".png"
-        url = f"https://www.addresses.com/people/{fName}+{lName}/{state}/"
+        url = f"https://www.addresses.com/people/{fName}+{lName}/" + (f"{state}/" if state else "")
         page.get(url)
         sleep(2)
             

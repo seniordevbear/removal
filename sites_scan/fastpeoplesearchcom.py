@@ -17,19 +17,20 @@ screentShotDir = os.path.join(base_dir, "ScreenShotScan", current_date)
 os.makedirs(screentShotDir, exist_ok=True)
 
 def fastpeoplesearchcom(dataRow, website_name, in_user_email, run_mode) : 
-    state = dataRow["State"]
-    print(state.capitalize())
-    if state.capitalize() in usaStateDictionary :
-        state = usaStateDictionary[state.capitalize()].lower()
-    else :
-        state = "ny"
+    # state_code() accepts "TX" or "Texas"; "" when unknown (no "ny" fallback,
+    # 2026-09-19). URL degrades: name_city-state -> name_state -> name.
+    state = state_code(dataRow.get("State"))
     fName = dataRow["Name"].split()[0].lower() # split string based on space to get first name
     lName = dataRow["Name"].split()[-1].lower()# split string based on space to get last name
-    city = dataRow["City"]
+    city = (dataRow.get("City") or "").strip().lower().replace(" ", "-")
     screenshot_save_path = screentShotDir + "\\FastPeopleSearchCom_" + fName + "-" + lName + ".png"
     page = ChromiumPage()
     print("fastpeoplesearch1")
-    url = f"https://www.fastpeoplesearch.com/name/{fName}-{lName}_{city}-{state}"
+    url = f"https://www.fastpeoplesearch.com/name/{fName}-{lName}"
+    if city and state:
+        url += f"_{city}-{state}"
+    elif state:
+        url += f"_{state}"
     page.get(url)
     print("fastpeoplesearch2")
     sleep(5)

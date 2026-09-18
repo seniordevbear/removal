@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
 import re
 from cloudsolver.extension import proxies
 from twocaptcha import TwoCaptcha
+from sites_scan._template import *
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -18,14 +19,18 @@ os.makedirs(screentShotDir, exist_ok=True)
 def advancedbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode) : 
     fName = dataRow["Name"].split()[0].lower() # split string based on space to get first name
     lName = dataRow["Name"].split()[-1].lower()# split string based on space to get last name
-    states = dataRow["State"].lower().split(" ")
-    if len(states) > 1 :
-        state = "-".join(states)
-    else :
-        state = "".join(states)
+    # The site wants the FULL state name as a slug ("texas", "new-york"); a
+    # two-letter code produced "_tx_" and no results. state_slug() handles
+    # both forms; unknown state / empty age are simply omitted (2026-09-19).
+    state = state_slug(dataRow.get("State"))
+    age = str(dataRow.get("Age") or "").strip()
     screenshot_save_path = screentShotDir + "\\AdvancedBackgroundChecksCom_" + fName + "-" + lName + ".png"
     page = ChromiumPage()
-    url = f"https://www.advancedbackgroundchecks.com/names/{fName}-{lName}_{state}_age_{dataRow['Age']}"
+    url = f"https://www.advancedbackgroundchecks.com/names/{fName}-{lName}"
+    if state:
+        url += f"_{state}"
+    if age.isdigit():
+        url += f"_age_{age}"
     page.get(url)
     sleep(6)
     cnt = 0
