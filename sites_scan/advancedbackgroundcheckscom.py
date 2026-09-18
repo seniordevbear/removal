@@ -16,62 +16,30 @@ base_dir = os.getcwd()
 screentShotDir = os.path.join(base_dir, "ScreenShotScan", current_date)
 os.makedirs(screentShotDir, exist_ok=True)
 
-def advancedbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode) : 
-    fName = dataRow["Name"].split()[0].lower() # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1].lower()# split string based on space to get last name
+def advancedbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode):
+    fName = dataRow["Name"].split()[0].lower()
+    lName = dataRow["Name"].split()[-1].lower()
     # The site wants the FULL state name as a slug ("texas", "new-york"); a
-    # two-letter code produced "_tx_" and no results. state_slug() handles
-    # both forms; unknown state / empty age are simply omitted (2026-09-19).
+    # two-letter code produced "_tx_" and no results. Unknown state / empty
+    # age are simply omitted (2026-09-19).
     state = state_slug(dataRow.get("State"))
     age = str(dataRow.get("Age") or "").strip()
-    screenshot_save_path = screentShotDir + "\\AdvancedBackgroundChecksCom_" + fName + "-" + lName + ".png"
-    page = ChromiumPage()
+    shot = screentShotDir + "\\AdvancedBackgroundChecksCom_" + fName + "-" + lName + ".png"
     url = f"https://www.advancedbackgroundchecks.com/names/{fName}-{lName}"
     if state:
         url += f"_{state}"
     if age.isdigit():
         url += f"_age_{age}"
-    page.get(url)
-    sleep(6)
-    cnt = 0
 
-    while True:
-        cnt = cnt + 1
-        if cnt > 20 : 
-            break
-        page_title = page.title
-        if "just a moment" in page_title.lower() :
-            page.actions.click()
-            page.actions.key_down("TAB")
-            sleep(0.2)
-            page.actions.key_up("TAB")
-            sleep(0.2)
-
-            page.actions.key_down("SPACE")
-            sleep(0.2)
-            page.actions.key_up("SPACE")
-
-            sleep(1.0)
-            print("Cloudflare solving...")
-        else :
-            break
-    sleep(1)
-    search_result = page.ele("tag:div@@id=cads-container")
-    if search_result:
-        result = page.eles("tag:div@@class=card-block")
-        if result:
-            element = result[0]
-            page.run_js('arguments[0].setAttribute("style", "border: 5px solid red;")', element)
-            sleep(4)
-            page.get_screenshot(screenshot_save_path)
-            page.quit()
-            print("Success Confirmation API is sent successfully!")
-            return screenshot_save_path
-        else:
-            print("No results found.")
-            page.quit()
-            return "Not Found"
-    else:
-        print("No results found.")
-        page.quit()
-        return "Not Found"
+    def body(page):
+        page.get(url)
+        sleep(6)
+        wait_cloudflare(page)
+        sleep(1)
+        if not page.ele("tag:div@@id=cads-container"):
+            return None
+        results = page.eles("tag:div@@class=card-block")
+        if not results:
+            return None
+        return highlight_and_shoot(page, results[0], shot)
+    return run_scan(body)

@@ -16,59 +16,27 @@ base_dir = os.getcwd()
 screentShotDir = os.path.join(base_dir, "ScreenShotScan", current_date)
 os.makedirs(screentShotDir, exist_ok=True)
 
-def fastpeoplesearchcom(dataRow, website_name, in_user_email, run_mode) : 
+def fastpeoplesearchcom(dataRow, website_name, in_user_email, run_mode):
     # state_code() accepts "TX" or "Texas"; "" when unknown (no "ny" fallback,
     # 2026-09-19). URL degrades: name_city-state -> name_state -> name.
     state = state_code(dataRow.get("State"))
-    fName = dataRow["Name"].split()[0].lower() # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1].lower()# split string based on space to get last name
+    fName = dataRow["Name"].split()[0].lower()
+    lName = dataRow["Name"].split()[-1].lower()
     city = (dataRow.get("City") or "").strip().lower().replace(" ", "-")
-    screenshot_save_path = screentShotDir + "\\FastPeopleSearchCom_" + fName + "-" + lName + ".png"
-    page = ChromiumPage()
-    print("fastpeoplesearch1")
+    shot = screentShotDir + "\\FastPeopleSearchCom_" + fName + "-" + lName + ".png"
     url = f"https://www.fastpeoplesearch.com/name/{fName}-{lName}"
     if city and state:
         url += f"_{city}-{state}"
     elif state:
         url += f"_{state}"
-    page.get(url)
-    print("fastpeoplesearch2")
-    sleep(5)
-    
-    cnt = 0
 
-    while True:
-        cnt = cnt + 1
-        if cnt > 20 : 
-            break
-        page_title = page.title
-        if "just a moment" in page_title.lower() :
-            page.actions.click()
-            page.actions.key_down("TAB")
-            sleep(0.2)
-            page.actions.key_up("TAB")
-            sleep(0.2)
-
-            page.actions.key_down("SPACE")
-            sleep(0.2)
-            page.actions.key_up("SPACE")
-
-            sleep(1.0)
-            print("Cloudflare solving...")
-        else :
-            break
-            
-    sleep(5)
-    result_container = page.eles("tag:div@@class=people-list")
-    if len(result_container) == 0:
-        print("No results found.")
-        page.quit()
-        return "Not Found"
-    else:
-        element = result_container[0]
-        page.run_js('arguments[0].setAttribute("style", "border: 5px solid red;")', element)
-        sleep(4)
-        page.get_screenshot(screenshot_save_path)
-        page.quit()
-        print("Success Confirmation API is sent successfully!")
-        return screenshot_save_path
+    def body(page):
+        page.get(url)
+        sleep(5)
+        wait_cloudflare(page)
+        sleep(5)
+        results = page.eles("tag:div@@class=people-list")
+        if not results:
+            return None
+        return highlight_and_shoot(page, results[0], shot)
+    return run_scan(body)

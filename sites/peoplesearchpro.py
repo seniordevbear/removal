@@ -47,6 +47,9 @@ def fill_input_data(page, dataRow) :
 
     form_inputs = page.eles("tag:input@@class=form__input")
 
+    if not form_inputs:
+        raise RuntimeError("peoplesearchpro: opt-out form inputs not found (page changed or did not load) — needs a survey")
+
     fName_input = form_inputs[0]
     fName_input.click()
     print("typing the first name...")

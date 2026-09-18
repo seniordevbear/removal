@@ -79,3 +79,57 @@ def state_slug(raw):
     if not code:
         return ""
     return _STATE_BY_CODE[code.upper()].lower().replace(" ", "-")
+
+
+# --- shared scan runner (2026-09-19) ---------------------------------------
+# The five live scan modules each created their own ChromiumPage and called
+# page.quit() only on the happy paths, so any exception leaked a Chrome
+# process; allpeople could also fall off the end and return None, which the
+# dispatcher treats as FOUND (anything but "Not Found") — a hit with no
+# screenshot. This runner guarantees quit() and maps None/"" to "Not Found".
+from time import sleep as _sleep
+
+
+def wait_cloudflare(page, tries=20):
+    """Click through Cloudflare's 'Just a moment' interstitial if it appears."""
+    for _ in range(tries):
+        try:
+            title = (page.title or "").lower()
+        except Exception:
+            return
+        if "just a moment" not in title:
+            return
+        try:
+            page.actions.click()
+            page.actions.key_down("TAB"); _sleep(0.2); page.actions.key_up("TAB"); _sleep(0.2)
+            page.actions.key_down("SPACE"); _sleep(0.2); page.actions.key_up("SPACE")
+        except Exception:
+            pass
+        _sleep(1.0)
+        print("Cloudflare solving...")
+
+
+def highlight_and_shoot(page, element, path):
+    """Red-box the matching listing and save the screenshot; returns path."""
+    page.run_js('arguments[0].setAttribute("style", "border: 5px solid red;")', element)
+    _sleep(4)
+    page.get_screenshot(path)
+    print("Success Confirmation API is sent successfully!")
+    return path
+
+
+def run_scan(body):
+    """Open a browser, run body(page) -> screenshot path | 'Not Found', always quit."""
+    from DrissionPage import ChromiumPage
+    page = ChromiumPage()
+    try:
+        result = body(page)
+        if not result:
+            print("No results found.")
+            return "Not Found"
+        return result
+    finally:
+        try:
+            page.quit()
+        except Exception:
+            pass

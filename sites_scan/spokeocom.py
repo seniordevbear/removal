@@ -14,25 +14,29 @@ base_dir = os.getcwd()
 
 screentShotDir = os.path.join(base_dir, "ScreenShotScan", current_date)
 os.makedirs(screentShotDir, exist_ok=True)
+from sites_scan._template import *
 
-def spokeocom(dataRow, website_name, in_user_email, run_mode) : 
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-    screenshot_save_path = screentShotDir + "\\SpokeoCom_" + fName + "-" + lName + ".png"
-    page = ChromiumPage()
-    url = f"https://www.spokeo.com/search/{fName}-{lName}"
-    page.get(url)
-    sleep(5)
-    result_container = page.eles("tag:div@@role=listitem")
-    if len(result_container) == 0:
-        print("No results found.")
-        page.quit()
-        return "Not Found"
-    else:
-        element = result_container[0]
-        page.run_js('arguments[0].setAttribute("style", "border: 5px solid red;")', element)
-        sleep(4)
-        page.get_screenshot(screenshot_save_path)
-        page.quit()
-        print("Success Confirmation API is sent successfully!")
-        return screenshot_save_path
+def spokeocom(dataRow, website_name, in_user_email, run_mode):
+    """Spokeo scan. State-aware since 2026-09-19: the name-only search page
+    lists every namesake in the country (828 "Jonathan Whitfield"s), so the
+    red-boxed first result was often someone else. Try the state page first
+    and fall back to the national search if it yields nothing."""
+    fName = dataRow["Name"].split()[0]
+    lName = dataRow["Name"].split()[-1]
+    shot = screentShotDir + "\\SpokeoCom_" + fName + "-" + lName + ".png"
+    state_name = state_slug(dataRow.get("State"))  # "texas" / "new-york" / ""
+
+    def body(page):
+        urls = []
+        if state_name:
+            urls.append(f"https://www.spokeo.com/{fName}-{lName}/{state_name.title()}")
+        urls.append(f"https://www.spokeo.com/search/{fName}-{lName}")
+        for url in urls:
+            page.get(url)
+            sleep(5)
+            wait_cloudflare(page)
+            results = page.eles("tag:div@@role=listitem")
+            if results:
+                return highlight_and_shoot(page, results[0], shot)
+        return None
+    return run_scan(body)

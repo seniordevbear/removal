@@ -5,6 +5,7 @@ import random
 import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
 import re
+from lib.broker_helpers import user_age
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -93,7 +94,7 @@ def persontrustcom(dataRow, website_name, in_user_email, run_mode) :
 
         current_year = now.year
         birth_year = dataRow["Birth Year"]
-        age = current_year - birth_year
+        age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
         print(age)
 
         rows = page.eles("tag:div@@class=tm-search-item")

@@ -5,6 +5,7 @@ import random
 import os, datetime, pyautogui, sys, requests
 from twocaptcha import TwoCaptcha
 from lib.common import generate_email, generate_phone_number
+from lib.broker_helpers import user_age
 
 api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
 solver = TwoCaptcha(api_key)
@@ -94,7 +95,7 @@ def fill_input_data(page, dataRow) :
     current_year = datetime.datetime.now().year
     print(current_year)
     birth_year = dataRow["Birth Year"]
-    age = current_year - birth_year
+    age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
     print(age)
 
     age_select = page.ele("tag:select@@id=age")

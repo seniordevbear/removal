@@ -905,6 +905,7 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
     user_city = (dataRow.get("City") or "").strip()
     user_state = (dataRow.get("State") or "").strip()
     user_zip = (dataRow.get("Zipcode") or "").strip()
+    profile_url = (dataRow.get("Profile URL") or "").strip()
 
     if not user_email or not user_name:
         raise RuntimeError("dataRow missing Name or User Email; cannot send CCPA request")
@@ -932,7 +933,11 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
         "  Address: " + user_address + "\n"
         "  City:    " + user_city + "\n"
         "  State:   " + user_state + "\n"
-        "  ZIP:     " + user_zip + "\n\n"
+        "  ZIP:     " + user_zip + "\n"
+        + ("  Profile: " + profile_url + "\n" if profile_url.startswith("http") else "")
+        + "\n"
+        "This request covers every record matching the name and address\n"
+        "above; where a profile URL is given, that listing specifically.\n\n"
         "If additional identity verification is required, please reply\n"
         "to this email. The Reply-To header is set to the consumer's\n"
         "direct email address (above) so any verification challenge\n"

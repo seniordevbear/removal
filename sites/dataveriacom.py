@@ -6,6 +6,7 @@ import os, datetime, pyautogui, requests, sys
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
 import re
+from lib.broker_helpers import user_age
 
 api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
 solver = TwoCaptcha(api_key)
@@ -101,7 +102,7 @@ def dataveriacom(dataRow, website_name, in_user_email, run_mode) :
         sleep(5)
         current_year = now.year
         birth_year = dataRow["Birth Year"]
-        age = current_year - birth_year
+        age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
         
         people_list = page.eles("tag:div@@class=search-item")
         print(people_list)

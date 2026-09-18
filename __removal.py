@@ -174,6 +174,10 @@ def removal(sio, target_domain, site_url, req_id, user_id, email, firstname,
     )
 
     data_row["__user_id__"] = user_id  # for per-user throttles in helpers
+    # The listing URL the dashboard/scan recorded for this broker, if any.
+    # Email-path brokers ask for it ("link to the profile" — information.com,
+    # 2026-09-18) and the CCPA template includes it when present.
+    data_row["Profile URL"] = (site_url or "").strip()
     ok, missing = validate_required_pii(data_row, target_domain)
     if not ok:
         # Surface a structured error so manage.py can mark the row with a

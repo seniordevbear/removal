@@ -52,6 +52,9 @@ def fill_input_data(page, dataRow) :
     iframe_container = page.ele("tag:iframe")
     input_elements = iframe_container.eles("tag:input")
 
+    if not input_elements:
+        raise RuntimeError("advancedpeoplesearchcom: opt-out form inputs not found (page changed or did not load) — needs a survey")
+
     fullName_input = input_elements[0]
     fullName_input.click()
     print("typing the first name...")

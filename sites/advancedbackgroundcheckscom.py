@@ -6,6 +6,7 @@ from cloudsolver.extension import proxies
 from twocaptcha import TwoCaptcha
 from lib.common import generate_email, generate_phone_number
 from lib.email_verification import do_email_verification
+from lib.broker_helpers import user_age
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -163,7 +164,7 @@ def advancedbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode):
 
         current_year = now.year
         birth_year = dataRow["Birth Year"]
-        age = current_year - birth_year
+        age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
 
         age_input = page.ele("tag:input@@id=search-name-age")
         age_input.click()
