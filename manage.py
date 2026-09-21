@@ -91,14 +91,27 @@ from lib.automation_delay import enable_automation_delays
 # the history away, which is why the July outage had no trail to read.
 # Rotation caps disk use at ~50MB — this machine already died once from an
 # unbounded directory, so nothing here may grow forever.
-_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+# Where: PD_LOG_DIR if set, else <this dir>/logs. Two files, both rotated:
+#   removal.log          size-rotated (10MB x 4) — the running tail
+#   removal-YYYY-MM-DD.log  one file per calendar day, kept 14 days
+# The per-day file exists because after a restart the size-rotated
+# removal.log.1 looked like "today's log" but was the previous run's tail,
+# and the new run had only written a few KB to removal.log (2026-09-21).
+# With daily files, "what happened on the 20th" is always one file.
+_LOG_DIR = os.getenv("PD_LOG_DIR", "").strip() or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "logs")
 _log_handlers = [logging.StreamHandler(sys.stderr)]
 try:
     os.makedirs(_LOG_DIR, exist_ok=True)
-    from logging.handlers import RotatingFileHandler
+    from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
     _log_handlers.append(RotatingFileHandler(
         os.path.join(_LOG_DIR, "removal.log"),
         maxBytes=10 * 1024 * 1024, backupCount=4, encoding="utf-8"))
+    _daily = TimedRotatingFileHandler(
+        os.path.join(_LOG_DIR, "removal-daily.log"),
+        when="midnight", backupCount=14, encoding="utf-8", utc=False)
+    _daily.suffix = "%Y-%m-%d.log"
+    _log_handlers.append(_daily)
 except OSError as _e:
     print("WARNING: file logging unavailable: %s" % _e, file=sys.stderr)
 logging.basicConfig(
@@ -109,6 +122,7 @@ logging.basicConfig(
 logging.getLogger("socketio").setLevel(logging.ERROR)
 logging.getLogger("engineio").setLevel(logging.ERROR)
 log = logging.getLogger("pd.removal")
+log.info("log files: %s (removal.log size-rotated; removal-daily.log.YYYY-MM-DD.log per day)", _LOG_DIR)
 
 # ----- environment patches (2026-09-18 log review: 2,340 failures / 85
 # successes in six days, 70% ElementNotFoundError spread evenly over ~110
@@ -553,12 +567,50 @@ def get_pending_google_scan(conn):
     """)
 
 
+_SCAN_MODULES_CACHE = None
+
+
+def _real_scan_domains():
+    """Domains that have a REAL sites_scan module (not an auto-generated stub).
+
+    408 of the 416 scan modules are stubs that raise ModuleNotFoundError.
+    Fetching their rows one by one and marking each step=4 cost ~0.3s per
+    row — about two minutes per user per (re)scan — and starved the five
+    real scans (the free-scan flow) behind them in the same queue
+    (2026-09-21). Selecting only real domains removes that entirely; stub
+    rows stay at step=0 and are simply never picked up. Cached per run.
+    """
+    global _SCAN_MODULES_CACHE
+    if _SCAN_MODULES_CACHE is None:
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sites_scan")
+        real = []
+        for name in os.listdir(base):
+            if not name.endswith(".py") or name.startswith("_"):
+                continue
+            try:
+                with open(os.path.join(base, name), "r", encoding="utf-8", errors="ignore") as fh:
+                    src = fh.read()
+            except OSError:
+                continue
+            if "raise ModuleNotFoundError" in src or "auto-generated stub" in src:
+                continue
+            real.append(name[:-3])
+        _SCAN_MODULES_CACHE = real
+        log.info("scan: %d real scan modules (%d stubs skipped)", len(real), len(os.listdir(base)) - len(real))
+    return _SCAN_MODULES_CACHE
+
+
 def get_pending_scan(conn):
+    domains = _real_scan_domains()
+    if not domains:
+        return []
+    placeholders = ",".join(["%s"] * len(domains))
     return _fetch_pending(conn, """
         SELECT t.*, u.email, u.firstname, u.lastname, u.city, u.zip, u.state, u.age
-        FROM (SELECT * FROM results WHERE step = 0 AND kind = 0 LIMIT 1000) AS t
+        FROM (SELECT * FROM results WHERE step = 0 AND kind = 0
+                AND target_domain IN (""" + placeholders + """) LIMIT 1000) AS t
         LEFT JOIN users u ON t.user_id = u.id
-    """)
+    """, tuple(domains))
 
 
 _CCPA_DOMAINS_CACHE = None

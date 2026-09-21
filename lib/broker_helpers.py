@@ -866,6 +866,47 @@ CCPA_PER_USER_PER_DAY = 10  # legacy; kept for any importer (no longer the activ
 CCPA_TOTAL_PER_DAY = 50
 
 
+# --- signed agent authorization (2026-09-19) ------------------------------
+# Brokers may refuse an agent's request without the consumer's signed
+# permission (11 CCR 7063; Radaris et al. do). The site produces a signed
+# PDF at onboarding; we fetch it once per user per run from
+#   {AUTHORIZATION_PDF_URL}?user_id=N   (secret-authenticated, same header as
+# the upload endpoints) and attach it to every CCPA/GDPR email. A user who
+# has not signed yet (404) sends without it, as before.
+AUTHORIZATION_PDF_URL = os.getenv(
+    "AUTHORIZATION_PDF_URL", "https://privacyduck.com/authorization_api/pdf")
+_AUTH_PDF_CACHE = {}          # user_id -> (bytes | None, fetched_at)
+_AUTH_PDF_CACHE_TTL = 6 * 3600
+
+
+def fetch_authorization_pdf(user_id):
+    """Signed authorization PDF bytes for user_id, or None. Cached 6h."""
+    try:
+        uid = int(user_id or 0)
+    except (TypeError, ValueError):
+        return None
+    if uid <= 0:
+        return None
+    hit = _AUTH_PDF_CACHE.get(uid)
+    if hit and time.time() - hit[1] < _AUTH_PDF_CACHE_TTL:
+        return hit[0]
+    secret = os.getenv("PD_UPLOAD_SECRET", "").strip()
+    data = None
+    if secret:
+        try:
+            import requests
+            r = requests.get(AUTHORIZATION_PDF_URL, params={"user_id": uid},
+                             headers={"X-PD-Upload-Secret": secret}, timeout=20)
+            if r.status_code == 200 and r.content.startswith(b"%PDF"):
+                data = r.content
+            elif r.status_code != 404:
+                log.warning("authorization pdf: HTTP %s for user %s", r.status_code, uid)
+        except Exception as e:  # network blip must never block the request itself
+            log.warning("authorization pdf fetch failed for user %s: %s", uid, e)
+    _AUTH_PDF_CACHE[uid] = (data, time.time())
+    return data
+
+
 def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
                            run_mode="non-headless"):
     """Send a CCPA-compliant opt-out + deletion request to the broker's
@@ -906,6 +947,7 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
     user_state = (dataRow.get("State") or "").strip()
     user_zip = (dataRow.get("Zipcode") or "").strip()
     profile_url = (dataRow.get("Profile URL") or "").strip()
+    auth_pdf = fetch_authorization_pdf(dataRow.get("__user_id__"))
 
     if not user_email or not user_name:
         raise RuntimeError("dataRow missing Name or User Email; cannot send CCPA request")
@@ -944,8 +986,10 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
         "reaches the consumer immediately.\n\n"
         "This request is submitted by PrivacyDuck (https://privacyduck.com),\n"
         "an authorized privacy-rights agent acting on the consumer's\n"
-        "behalf pursuant to CCPA Sec. 1798.140(d) and 11 CCR 7063.\n\n"
-        "Please confirm receipt and processing directly to the consumer\n"
+        "behalf pursuant to CCPA Sec. 1798.140(d) and 11 CCR 7063.\n"
+        + ("The consumer's signed authorization is attached\n"
+           "(PrivacyDuck-Authorization.pdf).\n\n" if auth_pdf else "\n")
+        + "Please confirm receipt and processing directly to the consumer\n"
         "at the email address above.\n\n"
         "Thank you for your prompt compliance.\n\n"
         "-- Sent by PrivacyDuck on behalf of " + user_name + "\n"
@@ -959,6 +1003,9 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
     msg["Subject"] = subject
     msg["Date"] = formatdate(localtime=True)
     msg.set_content(body)
+    if auth_pdf:
+        msg.add_attachment(auth_pdf, maintype="application", subtype="pdf",
+                           filename="PrivacyDuck-Authorization.pdf")
 
     # Aggregate daily throttle (changed 2026-05-29 from per-user 10/day to
     # global 50/day). Raises CCPADailyLimitReached when the GLOBAL counter
