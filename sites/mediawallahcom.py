@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
 from lib.email_verification import do_email_verification
 from cloudsolver.extension import proxies
 from twocaptcha import TwoCaptcha
+from lib.broker_helpers import select_onetrust_state
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -92,7 +93,7 @@ def fill_input_data(page, dataRow) :
     state_select = iframe_container.ele("tag:input@@id=stateDSARElement")
     state_select.click()
     sleep(random.uniform(0.1,0.5))
-    iframe_container.ele(f"tag:vt-option@@text():{dataRow["State"]}").click()
+    select_onetrust_state(iframe_container, dataRow["State"])  # full-name/code tolerant (2026-09-24)
 
     textarea_input = iframe_container.ele("tag:textarea@@id=undefined")
     textarea_input.click()

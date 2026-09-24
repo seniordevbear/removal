@@ -543,6 +543,39 @@ def select_state(select_ele, raw, timeout=4.0):
     raise RuntimeError("no state option matched; tried " + repr(cands))
 
 
+def select_onetrust_state(container, raw, timeout=3):
+    """Click the state option on a OneTrust DSAR form (<vt-option>).
+
+    OneTrust labels these options with the FULL state name ("Texas"), while
+    profiles hold a mix of "TX", "Texas" and free text. 13 scripts passed
+    dataRow["State"] straight into the selector, so a "TX" profile searched
+    for an option literally labelled "Tx" and raised ElementNotFoundError
+    (82 failures in the 2026-09-21..24 run); datatrustcom did a raw dict
+    lookup that KeyErrors on "TX". Tries full name, the raw value and the
+    upper-case code, against both aria-label and text(), then fails with a
+    message naming the real problem. Returns True when a click landed.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise RuntimeError("state option not found on OneTrust form; profile state is ''")
+    cands = []
+    for c in (_state_full_name(raw), raw, raw.upper(), raw.title()):
+        if c and c not in cands:
+            cands.append(c)
+    for c in cands:
+        for sel in (f"tag:vt-option@@aria-label={c}",
+                    f"tag:vt-option@@text()= {c} ",
+                    f"tag:vt-option@@text():{c}"):
+            try:
+                opt = container.ele(sel, timeout=timeout)
+            except Exception:
+                opt = None
+            if opt:
+                opt.click()
+                return True
+    raise RuntimeError("no state option matched; tried %r" % (cands,))
+
+
 def _state_full_name(raw):
     """User profile might store state as 'CA' or 'California'. The dropdown
     on the request portal wants the full name. Normalize."""
@@ -552,6 +585,63 @@ def _state_full_name(raw):
     if len(raw) == 2 and raw.upper() in _US_STATE_FULL:
         return _US_STATE_FULL[raw.upper()]
     return raw
+
+
+def _submit_arrests_contact_form(page, broker_name, base, dataRow):
+    """Fallback for *arrests.org sites with no opt-out portal (2026-09-24).
+
+    Those run Contact Form 7 at /contact-form with your-name / your-email /
+    your-message. We submit a CCPA/CPRA deletion request naming the consumer
+    and their address. Returns True when the form was filled and submitted.
+    """
+    try:
+        page.get(base + "/contact-form")
+        time.sleep(2.5)
+        try:
+            dismiss_common_consents(page, broker_name)
+        except Exception:
+            pass
+        name_el = page.ele("css:input[name='your-name']", timeout=4)
+        mail_el = page.ele("css:input[name='your-email']", timeout=2)
+        msg_el = page.ele("css:textarea[name='your-message']", timeout=2)
+        if not (name_el and mail_el and msg_el):
+            log_step(broker_name, "contact form not present either", logging.WARNING)
+            return False
+
+        consumer = (dataRow.get("Name") or "").strip()
+        city = (dataRow.get("City") or "").strip()
+        state = (dataRow.get("State") or "").strip()
+        addr = (dataRow.get("Address") or dataRow.get("Street") or "").strip()
+        zipc = (dataRow.get("Zipcode") or "").strip()
+        reply_to = (dataRow.get("User Email") or "").strip()
+        where = ", ".join(x for x in (addr, city, " ".join(y for y in (state, zipc) if y)) if x)
+        body = (
+            "Request to delete personal information (CCPA/CPRA Sec. 1798.105 "
+            "and equivalent state law).\n\n"
+            "Please remove all records and listings for the consumer below "
+            "from " + broker_name + " and stop selling or sharing their "
+            "personal information:\n\n"
+            "  Name:    " + consumer + "\n"
+            "  Address: " + (where or "(on file)") + "\n"
+            "  Email:   " + reply_to + "\n\n"
+            "This request is submitted by PrivacyDuck (privacyduck.com) as the "
+            "consumer's authorized agent. Please confirm the removal by reply."
+        )
+        name_el.click(); name_el.input(consumer or "PrivacyDuck")
+        mail_el.click(); mail_el.input(reply_to)
+        msg_el.click(); msg_el.input(body)
+        time.sleep(0.5)
+        btn = page.ele("css:input[type=submit], css:button[type=submit]", timeout=3)
+        if not btn:
+            log_step(broker_name, "contact form has no submit button", logging.WARNING)
+            return False
+        btn.click()
+        time.sleep(4)
+        log_step(broker_name, "CCPA deletion request submitted via /contact-form")
+        return True
+    except Exception as e:
+        log_step(broker_name, "contact-form fallback failed: %s" % e, logging.WARNING)
+        return False
 
 
 def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
@@ -626,12 +716,22 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
                     found = True
                     break
             if not found:
+                # 2026-09-24: the *arrests.org name covers TWO platforms. Only
+                # some (indianaarrests.org) run the WPForms portal; the rest
+                # (dcarrests.org, marylandarrests.org, nc/nd/idaho...) are a
+                # different build with no opt-out portal at all — their privacy
+                # page names no address and their only channel is a Contact
+                # Form 7 at /contact-form. Submitting a CCPA deletion request
+                # there is the documented route, so try it before giving up.
+                if _submit_arrests_contact_form(page, broker_name, base, dataRow):
+                    return screenshot_step(page, broker_name, "contact_form_submitted") \
+                        or screenshot_step(page, broker_name, "submitted")
                 screenshot_path = screenshot_step(page, broker_name, "no_form")
                 raise RuntimeError(
                     broker_name + ": no opt-out form at any known path "
                     "(/the-privacy-request-portal/, /privacy-request-portal, "
-                    "/optout/, /request-portal) — site layout changed, "
-                    "script needs a survey")
+                    "/optout/, /request-portal) and no /contact-form — "
+                    "site layout changed, script needs a survey")
 
             # -- consent toggles: WPForms uses checkboxes, older layouts used
             #    radios. Try both input types for each concept; missing is a

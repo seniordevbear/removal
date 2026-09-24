@@ -7,6 +7,7 @@ from twocaptcha import TwoCaptcha
 from lib.common import generate_email, generate_phone_number
 from lib.email_verification import do_email_verification
 from cloudsolver.extension import proxies
+from lib.broker_helpers import select_onetrust_state
 
 api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
 solver = TwoCaptcha(api_key)
@@ -91,10 +92,10 @@ def fill_input_data(page, dataRow) :
     state_select = iframe_container.ele("tag:input@@id=formField19DSARElement")
     state_select.click()
     sleep(random.uniform(0.1,0.5))
-    if iframe_container.ele(f"tag:vt-option@@aria-label={usaStateDictionary[dataRow['State']]}") != None :
-       iframe_container.ele(f"tag:vt-option@@aria-label={usaStateDictionary[dataRow['State']]}").click() 
-    else :
-        iframe_container.eles("tag:vt-option")[0].click()
+    # was usaStateDictionary[...] (KeyError on "TX") with an else-branch that
+    # clicked vt-option[0] — i.e. filed the request under the WRONG state
+    # rather than failing. The helper raises instead (2026-09-24).
+    select_onetrust_state(iframe_container, dataRow["State"])
 
     zip_input = iframe_container.ele("tag:input@@id=zipDSARElement")
     zip_input.click()

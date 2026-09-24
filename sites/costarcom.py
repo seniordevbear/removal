@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
 from lib.email_verification import do_email_verification
 from cloudsolver.extension import proxies
+from lib.broker_helpers import select_onetrust_state
 
 api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
 solver = TwoCaptcha(api_key)
@@ -66,7 +67,7 @@ def fill_input_data(page, dataRow) :
     state_select = page.ele("tag:input@@id=stateDSARElement")
     state_select.click()
     sleep(random.uniform(0.1,0.5))
-    page.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
+    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
 
     user_select = page.ele("tag:input@@id=formField74DSARElement")
     user_select.click()
