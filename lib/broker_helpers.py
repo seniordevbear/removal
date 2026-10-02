@@ -29,6 +29,7 @@ in a way the existing scripts don't already do. It's purely helper code.
 """
 from __future__ import annotations
 import os
+import re
 import sys
 import time
 import contextlib
@@ -111,8 +112,17 @@ def screenshot_step(page, broker: str, step: str, base_dir: Optional[str] = None
         os.makedirs(out_dir, exist_ok=True)
     except OSError:
         return None
-    ts = datetime.datetime.now().strftime("%H%M%S")
-    path = os.path.join(out_dir, f"{ts}_{step}.png")
+    # 2026-10-02: the name used to be <HHMMSS>_<step>.png — second granularity,
+    # no customer in it. Five workers on the same broker in the same second
+    # wrote the SAME file and both uploaded it, so one customer's filled form
+    # (name, email, address) was filed as another customer's removal evidence
+    # and went out in their quarterly report. 134 customers were affected.
+    # Thread name + microseconds + a random suffix make the path unique per
+    # attempt, so no two workers can ever share a screenshot file.
+    import threading as _th, uuid as _uuid
+    ts = datetime.datetime.now().strftime("%H%M%S_%f")
+    who = re.sub(r"[^A-Za-z0-9]+", "", _th.current_thread().name)[-12:] or "main"
+    path = os.path.join(out_dir, f"{ts}_{who}_{_uuid.uuid4().hex[:6]}_{step}.png")
     try:
         page.get_screenshot(path)
         return path
@@ -193,8 +203,12 @@ def run_infopay_optout(broker_name: str, url: str, dataRow, run_mode: str = "non
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     out_dir = os.path.join(base_dir, "ScreenShot", today)
     os.makedirs(out_dir, exist_ok=True)
+    # Same fix as screenshot_step(): two customers with the same name (or the
+    # John-Doe test rows) used to share one file.
+    import threading as _th2, uuid as _uuid2
+    _who = re.sub(r"[^A-Za-z0-9]+", "", _th2.current_thread().name)[-12:] or "main"
     screenshot_save_path = os.path.join(
-        out_dir, f"{broker_name}_{fName}-{lName}.png"
+        out_dir, f"{broker_name}_{fName}-{lName}_{datetime.datetime.now().strftime('%H%M%S_%f')}_{_who}_{_uuid2.uuid4().hex[:6]}.png"
     )
 
     try:
@@ -801,6 +815,12 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
             # everything else is best-effort: present on WPForms, absent on
             # InfoPay, and absence must not kill the run.
             _fill(["email"], email, extra_cands=("css:input[type=email]",))
+            # 2026-10-02: the portal has a "Confirm Email" box (WPForms secondary
+            # field). It was never filled, so EVERY submission on this family of
+            # 54 brokers was rejected with "This field is required" while the
+            # run was still reported as a success: 4,093 rows marked removed
+            # that were never submitted.
+            _fill(["confirm", "secondary", "email2", "email_2", "verify"], email)
             _fill(["addressLine1", "address1", "address-1", "address"], address_line_1)
             _fill(["city"], city)
             _fill(["zip", "postal"], zipc)
@@ -861,6 +881,17 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
 
             sleep(5)
             screenshot_path = screenshot_step(page, broker_name, "after_submit") or screenshot_path
+            # Did the portal accept it? A rejected form re-renders with
+            # "This field is required" under each empty box. Treat that as a
+            # failure (manage.py -> step 3, retried after the data is fixed),
+            # never as a removal.
+            try:
+                html_after = page.html or ""
+            except Exception:
+                html_after = ""
+            if "field is required" in html_after.lower():
+                raise RuntimeError("portal rejected the form: required fields missing "
+                                   "(address/city/state/zip/confirm-email)")
             log_step(broker_name, "submitted, exiting")
             return screenshot_path
         except Exception:
