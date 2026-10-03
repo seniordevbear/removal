@@ -1,0 +1,811 @@
+From 58ac711f9afd0a14fb72fe1c95fe2cecb7084915 Mon Sep 17 00:00:00 2001
+From: max994-dev <bmax994@outlook.com>
+Date: Fri, 18 Sep 2026 19:14:20 +0000
+Subject: [PATCH 1/6] Shared scan runner; profile URL in CCPA emails; more
+ user_age adopters
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- sites_scan/_template.py: add run_scan(), wait_cloudflare() and
+  highlight_and_shoot(), and move the five live scan modules onto them
+  (addressescom, advancedbackgroundcheckscom, allpeoplecom,
+  fastpeoplesearchcom, spokeocom). Each module had its own ChromiumPage and
+  quit() only on the happy paths, leaking Chrome on every exception; and
+  each swallowed every exception into "Not Found" — so a Cloudflare block or
+  a timeout was reported to the customer as "you are not on this site".
+  run_scan guarantees quit() in a finally and lets exceptions propagate,
+  where manage.py records them as step=3 "broker_raised" rather than
+  "not_found". It also maps a None/"" return to "Not Found": allpeople could
+  fall off the end and return None, which the dispatcher counts as FOUND — a
+  hit with no screenshot.
+
+- __removal.py, lib/broker_helpers.py: carry the listing URL the scan
+  recorded into data_row as "Profile URL", and include it in the CCPA
+  email when it is a real link. Email-path brokers ask for it
+  (information.com, 2026-09-18) and it makes the request specific.
+
+- sites/ (11 scripts): compute age through user_age() instead of
+  current_year - dataRow["Birth Year"] on a string.
+
+- sites/advancedpeoplesearchcom.py, sites/peoplesearchpro.py: raise a clear
+  "form inputs not found" error instead of IndexError when the page does not
+  render the opt-out form.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ __removal.py                              |  4 ++
+ lib/broker_helpers.py                     |  7 ++-
+ sites/advancedbackgroundcheckscom.py      |  3 +-
+ sites/advancedpeoplesearchcom.py          |  3 +
+ sites/courtcasefindercom.py               |  3 +-
+ sites/courtrecordsorg.py                  |  3 +-
+ sites/dataveriacom.py                     |  3 +-
+ sites/idtruecom.py                        |  3 +-
+ sites/kidslivesafecom.py                  |  3 +-
+ sites/peoplesearchpro.py                  |  3 +
+ sites/persontrustcom.py                   |  3 +-
+ sites/publicinfoservicescom.py            |  3 +-
+ sites/publicrecordreportscom.py           |  3 +-
+ sites/searchpublicrecordscom.py           |  3 +-
+ sites/spyflycom.py                        |  3 +-
+ sites_scan/_template.py                   | 54 ++++++++++++++++
+ sites_scan/addressescom.py                | 77 +++++++----------------
+ sites_scan/advancedbackgroundcheckscom.py | 68 ++++++--------------
+ sites_scan/allpeoplecom.py                | 67 ++++++--------------
+ sites_scan/fastpeoplesearchcom.py         | 60 +++++-------------
+ sites_scan/spokeocom.py                   | 46 +++++++-------
+ 21 files changed, 191 insertions(+), 231 deletions(-)
+
+diff --git a/__removal.py b/__removal.py
+index 2b8dc16..293c480 100644
+--- a/__removal.py
++++ b/__removal.py
+@@ -174,6 +174,10 @@ def removal(sio, target_domain, site_url, req_id, user_id, email, firstname,
+     )
+ 
+     data_row["__user_id__"] = user_id  # for per-user throttles in helpers
++    # The listing URL the dashboard/scan recorded for this broker, if any.
++    # Email-path brokers ask for it ("link to the profile" — information.com,
++    # 2026-09-18) and the CCPA template includes it when present.
++    data_row["Profile URL"] = (site_url or "").strip()
+     ok, missing = validate_required_pii(data_row, target_domain)
+     if not ok:
+         # Surface a structured error so manage.py can mark the row with a
+diff --git a/lib/broker_helpers.py b/lib/broker_helpers.py
+index 76fdd71..229b527 100644
+--- a/lib/broker_helpers.py
++++ b/lib/broker_helpers.py
+@@ -905,6 +905,7 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
+     user_city = (dataRow.get("City") or "").strip()
+     user_state = (dataRow.get("State") or "").strip()
+     user_zip = (dataRow.get("Zipcode") or "").strip()
++    profile_url = (dataRow.get("Profile URL") or "").strip()
+ 
+     if not user_email or not user_name:
+         raise RuntimeError("dataRow missing Name or User Email; cannot send CCPA request")
+@@ -932,7 +933,11 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
+         "  Address: " + user_address + "\n"
+         "  City:    " + user_city + "\n"
+         "  State:   " + user_state + "\n"
+-        "  ZIP:     " + user_zip + "\n\n"
++        "  ZIP:     " + user_zip + "\n"
++        + ("  Profile: " + profile_url + "\n" if profile_url.startswith("http") else "")
++        + "\n"
++        "This request covers every record matching the name and address\n"
++        "above; where a profile URL is given, that listing specifically.\n\n"
+         "If additional identity verification is required, please reply\n"
+         "to this email. The Reply-To header is set to the consumer's\n"
+         "direct email address (above) so any verification challenge\n"
+diff --git a/sites/advancedbackgroundcheckscom.py b/sites/advancedbackgroundcheckscom.py
+index 47322ad..112a94a 100644
+--- a/sites/advancedbackgroundcheckscom.py
++++ b/sites/advancedbackgroundcheckscom.py
+@@ -6,6 +6,7 @@ from cloudsolver.extension import proxies
+ from twocaptcha import TwoCaptcha
+ from lib.common import generate_email, generate_phone_number
+ from lib.email_verification import do_email_verification
++from lib.broker_helpers import user_age
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -163,7 +164,7 @@ def advancedbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode):
+ 
+         current_year = now.year
+         birth_year = dataRow["Birth Year"]
+-        age = current_year - birth_year
++        age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+ 
+         age_input = page.ele("tag:input@@id=search-name-age")
+         age_input.click()
+diff --git a/sites/advancedpeoplesearchcom.py b/sites/advancedpeoplesearchcom.py
+index edca8c4..080e3e5 100644
+--- a/sites/advancedpeoplesearchcom.py
++++ b/sites/advancedpeoplesearchcom.py
+@@ -52,6 +52,9 @@ def fill_input_data(page, dataRow) :
+     iframe_container = page.ele("tag:iframe")
+     input_elements = iframe_container.eles("tag:input")
+ 
++    if not input_elements:
++        raise RuntimeError("advancedpeoplesearchcom: opt-out form inputs not found (page changed or did not load) — needs a survey")
++
+     fullName_input = input_elements[0]
+     fullName_input.click()
+     print("typing the first name...")
+diff --git a/sites/courtcasefindercom.py b/sites/courtcasefindercom.py
+index e62e73b..3c78a63 100644
+--- a/sites/courtcasefindercom.py
++++ b/sites/courtcasefindercom.py
+@@ -8,6 +8,7 @@ from twocaptcha import TwoCaptcha
+ from lib.common import generate_email, generate_phone_number
+ from DrissionPage.common import Keys
+ from lib.email_verification import do_email_verification
++from lib.broker_helpers import user_age
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -134,7 +135,7 @@ def courtcasefindercom(dataRow, website_name, in_user_email, run_mode) :
+ 
+         current_year = now.year
+         birth_year = dataRow["Birth Year"]
+-        age = current_year - birth_year
++        age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+         print(age)
+ 
+         tbody_element = page.ele("tag:tbody")
+diff --git a/sites/courtrecordsorg.py b/sites/courtrecordsorg.py
+index 2bb2f2e..c7b87b9 100644
+--- a/sites/courtrecordsorg.py
++++ b/sites/courtrecordsorg.py
+@@ -8,6 +8,7 @@ from twocaptcha import TwoCaptcha
+ from lib.common import generate_email, generate_phone_number
+ from DrissionPage.common import Keys
+ from lib.email_verification import do_email_verification
++from lib.broker_helpers import user_age
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -138,7 +139,7 @@ def courtrecordsorg(dataRow, website_name, in_user_email, run_mode) :
+ 
+         current_year = now.year
+         birth_year = dataRow["Birth Year"]
+-        age = current_year - birth_year
++        age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+         print(age)
+ 
+         tbody_element = page.ele("tag:tbody")
+diff --git a/sites/dataveriacom.py b/sites/dataveriacom.py
+index 5b744d8..0600adb 100644
+--- a/sites/dataveriacom.py
++++ b/sites/dataveriacom.py
+@@ -6,6 +6,7 @@ import os, datetime, pyautogui, requests, sys
+ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ import re
++from lib.broker_helpers import user_age
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -101,7 +102,7 @@ def dataveriacom(dataRow, website_name, in_user_email, run_mode) :
+         sleep(5)
+         current_year = now.year
+         birth_year = dataRow["Birth Year"]
+-        age = current_year - birth_year
++        age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+         
+         people_list = page.eles("tag:div@@class=search-item")
+         print(people_list)
+diff --git a/sites/idtruecom.py b/sites/idtruecom.py
+index 2119f59..13f9780 100644
+--- a/sites/idtruecom.py
++++ b/sites/idtruecom.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from lib.email_verification import do_email_verification
+ from cloudsolver.extension import proxies
+ from twocaptcha import TwoCaptcha
++from lib.broker_helpers import user_age
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -123,7 +124,7 @@ def idtruecom(dataRow, website_name, in_user_email, run_mode) :
+ 
+         current_year = now.year
+         birth_year = dataRow["Birth Year"]
+-        age = current_year - birth_year
++        age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+         print(age)
+ 
+         rows = page.eles("tag:form")
+diff --git a/sites/kidslivesafecom.py b/sites/kidslivesafecom.py
+index b2ae9dd..624f703 100644
+--- a/sites/kidslivesafecom.py
++++ b/sites/kidslivesafecom.py
+@@ -5,6 +5,7 @@ import random
+ import os, datetime, pyautogui, sys, requests
+ from twocaptcha import TwoCaptcha
+ from lib.common import generate_email, generate_phone_number
++from lib.broker_helpers import user_age
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -97,7 +98,7 @@ def fill_input_data(page, dataRow) :
+     current_year = datetime.datetime.now().year
+     print(current_year)
+     birth_year = dataRow["Birth Year"]
+-    age = current_year - birth_year
++    age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+     print(age)
+ 
+     age_select = page.ele("tag:select@@id=age")
+diff --git a/sites/peoplesearchpro.py b/sites/peoplesearchpro.py
+index 211dc76..683c05f 100644
+--- a/sites/peoplesearchpro.py
++++ b/sites/peoplesearchpro.py
+@@ -47,6 +47,9 @@ def fill_input_data(page, dataRow) :
+ 
+     form_inputs = page.eles("tag:input@@class=form__input")
+ 
++    if not form_inputs:
++        raise RuntimeError("peoplesearchpro: opt-out form inputs not found (page changed or did not load) — needs a survey")
++
+     fName_input = form_inputs[0]
+     fName_input.click()
+     print("typing the first name...")
+diff --git a/sites/persontrustcom.py b/sites/persontrustcom.py
+index db7cf2d..f342d09 100644
+--- a/sites/persontrustcom.py
++++ b/sites/persontrustcom.py
+@@ -5,6 +5,7 @@ import random
+ import os, datetime, pyautogui, requests
+ from lib.common import generate_email, generate_phone_number
+ import re
++from lib.broker_helpers import user_age
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -93,7 +94,7 @@ def persontrustcom(dataRow, website_name, in_user_email, run_mode) :
+ 
+         current_year = now.year
+         birth_year = dataRow["Birth Year"]
+-        age = current_year - birth_year
++        age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+         print(age)
+ 
+         rows = page.eles("tag:div@@class=tm-search-item")
+diff --git a/sites/publicinfoservicescom.py b/sites/publicinfoservicescom.py
+index 7e7f760..9cb7487 100644
+--- a/sites/publicinfoservicescom.py
++++ b/sites/publicinfoservicescom.py
+@@ -5,6 +5,7 @@ import random
+ import os, datetime, pyautogui, sys, requests
+ from twocaptcha import TwoCaptcha
+ from lib.common import generate_email, generate_phone_number
++from lib.broker_helpers import user_age
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -95,7 +96,7 @@ def fill_input_data(page, dataRow) :
+     current_year = datetime.datetime.now().year
+     print(current_year)
+     birth_year = dataRow["Birth Year"]
+-    age = current_year - birth_year
++    age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+     print(age)
+ 
+     age_select = page.ele("tag:select@@id=age")
+diff --git a/sites/publicrecordreportscom.py b/sites/publicrecordreportscom.py
+index 2984d6b..5b1c45b 100644
+--- a/sites/publicrecordreportscom.py
++++ b/sites/publicrecordreportscom.py
+@@ -5,6 +5,7 @@ import random
+ import os, datetime, pyautogui, sys, requests
+ from twocaptcha import TwoCaptcha
+ from lib.common import generate_email, generate_phone_number
++from lib.broker_helpers import user_age
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -98,7 +99,7 @@ def fill_input_data(page, dataRow) :
+     current_year = datetime.datetime.now().year
+     print(current_year)
+     birth_year = dataRow["Birth Year"]
+-    age = current_year - birth_year
++    age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+     print(age)
+ 
+     age_select = page.ele("tag:select@@id=age")
+diff --git a/sites/searchpublicrecordscom.py b/sites/searchpublicrecordscom.py
+index 4afa6a3..ce889f3 100644
+--- a/sites/searchpublicrecordscom.py
++++ b/sites/searchpublicrecordscom.py
+@@ -5,6 +5,7 @@ import random
+ import os, datetime, pyautogui, sys, requests
+ from twocaptcha import TwoCaptcha
+ from lib.common import generate_email, generate_phone_number
++from lib.broker_helpers import user_age
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -98,7 +99,7 @@ def fill_input_data(page, dataRow) :
+     current_year = datetime.datetime.now().year
+     print(current_year)
+     birth_year = dataRow["Birth Year"]
+-    age = current_year - birth_year
++    age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+     print(age)
+ 
+     age_select = page.ele("tag:select@@id=age")
+diff --git a/sites/spyflycom.py b/sites/spyflycom.py
+index 240b26f..62864cb 100644
+--- a/sites/spyflycom.py
++++ b/sites/spyflycom.py
+@@ -5,6 +5,7 @@ import random
+ import os, datetime, pyautogui, sys, requests
+ from twocaptcha import TwoCaptcha
+ from lib.common import generate_email, generate_phone_number
++from lib.broker_helpers import user_age
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -94,7 +95,7 @@ def fill_input_data(page, dataRow) :
+     current_year = datetime.datetime.now().year
+     print(current_year)
+     birth_year = dataRow["Birth Year"]
+-    age = current_year - birth_year
++    age = user_age(dataRow)  # int-safe; IncompletePII if no birth year/age
+     print(age)
+ 
+     age_select = page.ele("tag:select@@id=age")
+diff --git a/sites_scan/_template.py b/sites_scan/_template.py
+index 44beba7..2366e58 100644
+--- a/sites_scan/_template.py
++++ b/sites_scan/_template.py
+@@ -79,3 +79,57 @@ def state_slug(raw):
+     if not code:
+         return ""
+     return _STATE_BY_CODE[code.upper()].lower().replace(" ", "-")
++
++
++# --- shared scan runner (2026-09-19) ---------------------------------------
++# The five live scan modules each created their own ChromiumPage and called
++# page.quit() only on the happy paths, so any exception leaked a Chrome
++# process; allpeople could also fall off the end and return None, which the
++# dispatcher treats as FOUND (anything but "Not Found") — a hit with no
++# screenshot. This runner guarantees quit() and maps None/"" to "Not Found".
++from time import sleep as _sleep
++
++
++def wait_cloudflare(page, tries=20):
++    """Click through Cloudflare's 'Just a moment' interstitial if it appears."""
++    for _ in range(tries):
++        try:
++            title = (page.title or "").lower()
++        except Exception:
++            return
++        if "just a moment" not in title:
++            return
++        try:
++            page.actions.click()
++            page.actions.key_down("TAB"); _sleep(0.2); page.actions.key_up("TAB"); _sleep(0.2)
++            page.actions.key_down("SPACE"); _sleep(0.2); page.actions.key_up("SPACE")
++        except Exception:
++            pass
++        _sleep(1.0)
++        print("Cloudflare solving...")
++
++
++def highlight_and_shoot(page, element, path):
++    """Red-box the matching listing and save the screenshot; returns path."""
++    page.run_js('arguments[0].setAttribute("style", "border: 5px solid red;")', element)
++    _sleep(4)
++    page.get_screenshot(path)
++    print("Success Confirmation API is sent successfully!")
++    return path
++
++
++def run_scan(body):
++    """Open a browser, run body(page) -> screenshot path | 'Not Found', always quit."""
++    from DrissionPage import ChromiumPage
++    page = ChromiumPage()
++    try:
++        result = body(page)
++        if not result:
++            print("No results found.")
++            return "Not Found"
++        return result
++    finally:
++        try:
++            page.quit()
++        except Exception:
++            pass
+diff --git a/sites_scan/addressescom.py b/sites_scan/addressescom.py
+index 9775c40..26181b5 100644
+--- a/sites_scan/addressescom.py
++++ b/sites_scan/addressescom.py
+@@ -12,61 +12,28 @@ base_dir = os.getcwd()
+ screentShotDir = os.path.join(base_dir, "ScreenShotScan", current_date)
+ os.makedirs(screentShotDir, exist_ok=True)
+ 
+-def addressescom(dataRow, website_name, in_user_email, run_mode) :
+-    page = ChromiumPage()
+-    try:
+-        # state_code() accepts "TX" or "Texas"; "" when unknown. The old code
+-        # fell back to "ny" for any two-letter code (2026-09-19 fix).
+-        state = state_code(dataRow.get("State"))
+-        fName = (dataRow["Name"].split()[0]).lower() # split string based on space to get first name
+-        lName = (dataRow["Name"].split()[-1]).lower()# split string based on space to get last name
+-        screenshot_save_path = screentShotDir + "\\AddressesCom_" + fName + "-" + lName + ".png"
+-        url = f"https://www.addresses.com/people/{fName}+{lName}/" + (f"{state}/" if state else "")
++def addressescom(dataRow, website_name, in_user_email, run_mode):
++    # state_code() accepts "TX" or "Texas"; "" when unknown. The old code
++    # fell back to "ny" for any two-letter code (2026-09-19 fix).
++    state = state_code(dataRow.get("State"))
++    fName = (dataRow["Name"].split()[0]).lower()
++    lName = (dataRow["Name"].split()[-1]).lower()
++    shot = screentShotDir + "\\AddressesCom_" + fName + "-" + lName + ".png"
++    url = f"https://www.addresses.com/people/{fName}+{lName}/" + (f"{state}/" if state else "")
++
++    def body(page):
+         page.get(url)
+         sleep(2)
+-            
+-        cnt = 0
+-
+-        while True:
+-            cnt = cnt + 1
+-            if cnt > 20 : 
+-                break
+-            page_title = page.title
+-            if "just a moment" in page_title.lower() :
+-                page.actions.click()
+-                page.actions.key_down("TAB")
+-                sleep(0.2)
+-                page.actions.key_up("TAB")
+-                sleep(0.2)
+-
+-                page.actions.key_down("SPACE")
+-                sleep(0.2)
+-                page.actions.key_up("SPACE")
+-
+-                sleep(1.0)
+-                print("Cloudflare solving...")
+-            else :
+-                break
++        wait_cloudflare(page)
+         sleep(1)
+-        page.ele("tag:div@@id=checkbox").click()
+-        sleep(5)
+-        people_container = page.ele("tag:div@@class=people-container")
+-        if people_container:
+-            result = page.eles("tag:div@@class=person")
+-            if result:
+-                print(result)
+-                element = result[0]
+-                page.run_js('arguments[0].setAttribute("style", "border: 5px solid red;")', element)
+-                sleep(4)
+-                page.get_screenshot(screenshot_save_path)
+-                page.quit()
+-                print("Success Confirmation API is sent successfully!")
+-                return screenshot_save_path
+-            else:
+-                print("No results found.")
+-                page.quit()
+-                return "Not Found"
+-    except Exception as e:
+-        print("Error Confirmation API is failed: ", str(e))
+-        page.quit()
+-        return "Not Found"
+\ No newline at end of file
++        cb = page.ele("tag:div@@id=checkbox", timeout=5)
++        if cb:
++            cb.click()
++            sleep(5)
++        if not page.ele("tag:div@@class=people-container", timeout=10):
++            return None
++        results = page.eles("tag:div@@class=person")
++        if not results:
++            return None
++        return highlight_and_shoot(page, results[0], shot)
++    return run_scan(body)
+diff --git a/sites_scan/advancedbackgroundcheckscom.py b/sites_scan/advancedbackgroundcheckscom.py
+index abc009a..0ae2d91 100644
+--- a/sites_scan/advancedbackgroundcheckscom.py
++++ b/sites_scan/advancedbackgroundcheckscom.py
+@@ -16,62 +16,30 @@ base_dir = os.getcwd()
+ screentShotDir = os.path.join(base_dir, "ScreenShotScan", current_date)
+ os.makedirs(screentShotDir, exist_ok=True)
+ 
+-def advancedbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode) : 
+-    fName = dataRow["Name"].split()[0].lower() # split string based on space to get first name
+-    lName = dataRow["Name"].split()[-1].lower()# split string based on space to get last name
++def advancedbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode):
++    fName = dataRow["Name"].split()[0].lower()
++    lName = dataRow["Name"].split()[-1].lower()
+     # The site wants the FULL state name as a slug ("texas", "new-york"); a
+-    # two-letter code produced "_tx_" and no results. state_slug() handles
+-    # both forms; unknown state / empty age are simply omitted (2026-09-19).
++    # two-letter code produced "_tx_" and no results. Unknown state / empty
++    # age are simply omitted (2026-09-19).
+     state = state_slug(dataRow.get("State"))
+     age = str(dataRow.get("Age") or "").strip()
+-    screenshot_save_path = screentShotDir + "\\AdvancedBackgroundChecksCom_" + fName + "-" + lName + ".png"
+-    page = ChromiumPage()
++    shot = screentShotDir + "\\AdvancedBackgroundChecksCom_" + fName + "-" + lName + ".png"
+     url = f"https://www.advancedbackgroundchecks.com/names/{fName}-{lName}"
+     if state:
+         url += f"_{state}"
+     if age.isdigit():
+         url += f"_age_{age}"
+-    page.get(url)
+-    sleep(6)
+-    cnt = 0
+ 
+-    while True:
+-        cnt = cnt + 1
+-        if cnt > 20 : 
+-            break
+-        page_title = page.title
+-        if "just a moment" in page_title.lower() :
+-            page.actions.click()
+-            page.actions.key_down("TAB")
+-            sleep(0.2)
+-            page.actions.key_up("TAB")
+-            sleep(0.2)
+-
+-            page.actions.key_down("SPACE")
+-            sleep(0.2)
+-            page.actions.key_up("SPACE")
+-
+-            sleep(1.0)
+-            print("Cloudflare solving...")
+-        else :
+-            break
+-    sleep(1)
+-    search_result = page.ele("tag:div@@id=cads-container")
+-    if search_result:
+-        result = page.eles("tag:div@@class=card-block")
+-        if result:
+-            element = result[0]
+-            page.run_js('arguments[0].setAttribute("style", "border: 5px solid red;")', element)
+-            sleep(4)
+-            page.get_screenshot(screenshot_save_path)
+-            page.quit()
+-            print("Success Confirmation API is sent successfully!")
+-            return screenshot_save_path
+-        else:
+-            print("No results found.")
+-            page.quit()
+-            return "Not Found"
+-    else:
+-        print("No results found.")
+-        page.quit()
+-        return "Not Found"
+\ No newline at end of file
++    def body(page):
++        page.get(url)
++        sleep(6)
++        wait_cloudflare(page)
++        sleep(1)
++        if not page.ele("tag:div@@id=cads-container"):
++            return None
++        results = page.eles("tag:div@@class=card-block")
++        if not results:
++            return None
++        return highlight_and_shoot(page, results[0], shot)
++    return run_scan(body)
+diff --git a/sites_scan/allpeoplecom.py b/sites_scan/allpeoplecom.py
+index 4556b40..41eb2b6 100644
+--- a/sites_scan/allpeoplecom.py
++++ b/sites_scan/allpeoplecom.py
+@@ -14,52 +14,25 @@ base_dir = os.getcwd()
+ 
+ screentShotDir = os.path.join(base_dir, "ScreenShotScan", current_date)
+ os.makedirs(screentShotDir, exist_ok=True)
++from sites_scan._template import *
+ 
+-def allpeoplecom(dataRow, website_name, in_user_email, run_mode) : 
+-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
+-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+-    screenshot_save_path = screentShotDir + "\\AllPeopleCom_" + fName + "-" + lName + ".png"
+-    page = ChromiumPage()
+-    url = f"https://allpeople.com/search?ss={fName}+{lName}+&ss-e=&ss-p=&ss-i=&where={dataRow['City']}%2C+{dataRow['State']}&industry-auto=&where-auto="
+-    page.get(url)
+-    sleep(5)
+-    
+-    cnt = 0
++def allpeoplecom(dataRow, website_name, in_user_email, run_mode):
++    fName = dataRow["Name"].split()[0]
++    lName = dataRow["Name"].split()[-1]
++    shot = screentShotDir + "\\AllPeopleCom_" + fName + "-" + lName + ".png"
++    city = (dataRow.get("City") or "").strip()
++    state = state_code(dataRow.get("State")).upper()
++    where = ", ".join(x for x in (city, state) if x)
+ 
+-    while True:
+-        cnt = cnt + 1
+-        if cnt > 20 : 
+-            break
+-        page_title = page.title
+-        if "just a moment" in page_title.lower() :
+-            page.actions.click()
+-            page.actions.key_down("TAB")
+-            sleep(0.2)
+-            page.actions.key_up("TAB")
+-            sleep(0.2)
+-
+-            page.actions.key_down("SPACE")
+-            sleep(0.2)
+-            page.actions.key_up("SPACE")
+-
+-            sleep(1.0)
+-            print("Cloudflare solving...")
+-        else :
+-            break
+-    sleep(5)
+-    is_search = page.ele("tag:h3@@style=font-size: 12px; color: #577594;")
+-    if not is_search:
+-        print("Search OK")
+-        search_results = page.eles("tag:div@@class=rev-flex rev-flex-s")
+-        if search_results:
+-            result = search_results[0]
+-            page.run_js('arguments[0].setAttribute("style", "border: 5px solid red;")', result)
+-            sleep(4)
+-            page.get_screenshot(screenshot_save_path)
+-            page.quit()
+-            print("Success Confirmation API is sent successfully!")
+-            return screenshot_save_path
+-    else:
+-        print("No results found.")
+-        page.quit()
+-        return "Not Found"
+\ No newline at end of file
++    def body(page):
++        page.get(f"https://allpeople.com/search?ss={fName}+{lName}+&ss-e=&ss-p=&ss-i=&where={where}&industry-auto=&where-auto=")
++        sleep(5)
++        wait_cloudflare(page)
++        sleep(5)
++        if page.ele("tag:h3@@style=font-size: 12px; color: #577594;"):
++            return None  # the "no results" heading
++        results = page.eles("tag:div@@class=rev-flex rev-flex-s")
++        if not results:
++            return None  # used to fall off the end here and return None == FOUND
++        return highlight_and_shoot(page, results[0], shot)
++    return run_scan(body)
+diff --git a/sites_scan/fastpeoplesearchcom.py b/sites_scan/fastpeoplesearchcom.py
+index bf3431f..9e587b2 100644
+--- a/sites_scan/fastpeoplesearchcom.py
++++ b/sites_scan/fastpeoplesearchcom.py
+@@ -16,59 +16,27 @@ base_dir = os.getcwd()
+ screentShotDir = os.path.join(base_dir, "ScreenShotScan", current_date)
+ os.makedirs(screentShotDir, exist_ok=True)
+ 
+-def fastpeoplesearchcom(dataRow, website_name, in_user_email, run_mode) : 
++def fastpeoplesearchcom(dataRow, website_name, in_user_email, run_mode):
+     # state_code() accepts "TX" or "Texas"; "" when unknown (no "ny" fallback,
+     # 2026-09-19). URL degrades: name_city-state -> name_state -> name.
+     state = state_code(dataRow.get("State"))
+-    fName = dataRow["Name"].split()[0].lower() # split string based on space to get first name
+-    lName = dataRow["Name"].split()[-1].lower()# split string based on space to get last name
++    fName = dataRow["Name"].split()[0].lower()
++    lName = dataRow["Name"].split()[-1].lower()
+     city = (dataRow.get("City") or "").strip().lower().replace(" ", "-")
+-    screenshot_save_path = screentShotDir + "\\FastPeopleSearchCom_" + fName + "-" + lName + ".png"
+-    page = ChromiumPage()
+-    print("fastpeoplesearch1")
++    shot = screentShotDir + "\\FastPeopleSearchCom_" + fName + "-" + lName + ".png"
+     url = f"https://www.fastpeoplesearch.com/name/{fName}-{lName}"
+     if city and state:
+         url += f"_{city}-{state}"
+     elif state:
+         url += f"_{state}"
+-    page.get(url)
+-    print("fastpeoplesearch2")
+-    sleep(5)
+-    
+-    cnt = 0
+ 
+-    while True:
+-        cnt = cnt + 1
+-        if cnt > 20 : 
+-            break
+-        page_title = page.title
+-        if "just a moment" in page_title.lower() :
+-            page.actions.click()
+-            page.actions.key_down("TAB")
+-            sleep(0.2)
+-            page.actions.key_up("TAB")
+-            sleep(0.2)
+-
+-            page.actions.key_down("SPACE")
+-            sleep(0.2)
+-            page.actions.key_up("SPACE")
+-
+-            sleep(1.0)
+-            print("Cloudflare solving...")
+-        else :
+-            break
+-            
+-    sleep(5)
+-    result_container = page.eles("tag:div@@class=people-list")
+-    if len(result_container) == 0:
+-        print("No results found.")
+-        page.quit()
+-        return "Not Found"
+-    else:
+-        element = result_container[0]
+-        page.run_js('arguments[0].setAttribute("style", "border: 5px solid red;")', element)
+-        sleep(4)
+-        page.get_screenshot(screenshot_save_path)
+-        page.quit()
+-        print("Success Confirmation API is sent successfully!")
+-        return screenshot_save_path
+\ No newline at end of file
++    def body(page):
++        page.get(url)
++        sleep(5)
++        wait_cloudflare(page)
++        sleep(5)
++        results = page.eles("tag:div@@class=people-list")
++        if not results:
++            return None
++        return highlight_and_shoot(page, results[0], shot)
++    return run_scan(body)
+diff --git a/sites_scan/spokeocom.py b/sites_scan/spokeocom.py
+index 5e32a05..5e92e55 100644
+--- a/sites_scan/spokeocom.py
++++ b/sites_scan/spokeocom.py
+@@ -14,25 +14,29 @@ base_dir = os.getcwd()
+ 
+ screentShotDir = os.path.join(base_dir, "ScreenShotScan", current_date)
+ os.makedirs(screentShotDir, exist_ok=True)
++from sites_scan._template import *
+ 
+-def spokeocom(dataRow, website_name, in_user_email, run_mode) : 
+-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
+-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+-    screenshot_save_path = screentShotDir + "\\SpokeoCom_" + fName + "-" + lName + ".png"
+-    page = ChromiumPage()
+-    url = f"https://www.spokeo.com/search/{fName}-{lName}"
+-    page.get(url)
+-    sleep(5)
+-    result_container = page.eles("tag:div@@role=listitem")
+-    if len(result_container) == 0:
+-        print("No results found.")
+-        page.quit()
+-        return "Not Found"
+-    else:
+-        element = result_container[0]
+-        page.run_js('arguments[0].setAttribute("style", "border: 5px solid red;")', element)
+-        sleep(4)
+-        page.get_screenshot(screenshot_save_path)
+-        page.quit()
+-        print("Success Confirmation API is sent successfully!")
+-        return screenshot_save_path
+\ No newline at end of file
++def spokeocom(dataRow, website_name, in_user_email, run_mode):
++    """Spokeo scan. State-aware since 2026-09-19: the name-only search page
++    lists every namesake in the country (828 "Jonathan Whitfield"s), so the
++    red-boxed first result was often someone else. Try the state page first
++    and fall back to the national search if it yields nothing."""
++    fName = dataRow["Name"].split()[0]
++    lName = dataRow["Name"].split()[-1]
++    shot = screentShotDir + "\\SpokeoCom_" + fName + "-" + lName + ".png"
++    state_name = state_slug(dataRow.get("State"))  # "texas" / "new-york" / ""
++
++    def body(page):
++        urls = []
++        if state_name:
++            urls.append(f"https://www.spokeo.com/{fName}-{lName}/{state_name.title()}")
++        urls.append(f"https://www.spokeo.com/search/{fName}-{lName}")
++        for url in urls:
++            page.get(url)
++            sleep(5)
++            wait_cloudflare(page)
++            results = page.eles("tag:div@@role=listitem")
++            if results:
++                return highlight_and_shoot(page, results[0], shot)
++        return None
++    return run_scan(body)
+-- 
+2.43.0
+

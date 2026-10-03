@@ -1,0 +1,218 @@
+From 78747995c379660563577c0eeaaee8b90cb9422c Mon Sep 17 00:00:00 2001
+From: max994-dev <bmax994@outlook.com>
+Date: Mon, 21 Sep 2026 03:43:40 +0000
+Subject: [PATCH 2/6] Attach the signed authorization to CCPA emails; skip stub
+ scan rows; daily log files
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- lib/broker_helpers.py: brokers may refuse an agent's request without the
+  consumer's signed permission (11 CCR 7063 — Radaris and others do). The
+  site now produces a signed PDF at onboarding; fetch it from
+  AUTHORIZATION_PDF_URL (authenticated with the same PD_UPLOAD_SECRET header
+  as the upload endpoints), cache it per user for 6h, and attach it to every
+  CCPA/GDPR email as PrivacyDuck-Authorization.pdf. A user who has not
+  signed (404) sends without it, exactly as before; a network failure logs
+  and sends without it rather than blocking the request.
+
+- manage.py: 408 of the 416 sites_scan modules are auto-generated stubs
+  that raise ModuleNotFoundError. get_pending_scan fetched their rows
+  regardless and marked each step=4 one at a time — about 0.3s a row, two
+  minutes per user per rescan — and the five real scans (the free-scan
+  flow) queued behind that churn. Restrict selection to domains with a real
+  module, detected once per run; stub rows simply stay at step=0.
+
+- manage.py: add a per-day log file (removal-daily.log.YYYY-MM-DD.log, kept
+  14 days) beside the size-rotated removal.log. After a restart the rotated
+  removal.log.1 looked like today's log but was the previous run's tail;
+  with daily files "what happened on the 20th" is always one file. PD_LOG_DIR
+  overrides the location.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ lib/broker_helpers.py | 51 ++++++++++++++++++++++++++++++++++--
+ manage.py             | 60 ++++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 105 insertions(+), 6 deletions(-)
+
+diff --git a/lib/broker_helpers.py b/lib/broker_helpers.py
+index 229b527..c022aa4 100644
+--- a/lib/broker_helpers.py
++++ b/lib/broker_helpers.py
+@@ -866,6 +866,47 @@ CCPA_PER_USER_PER_DAY = 10  # legacy; kept for any importer (no longer the activ
+ CCPA_TOTAL_PER_DAY = 50
+ 
+ 
++# --- signed agent authorization (2026-09-19) ------------------------------
++# Brokers may refuse an agent's request without the consumer's signed
++# permission (11 CCR 7063; Radaris et al. do). The site produces a signed
++# PDF at onboarding; we fetch it once per user per run from
++#   {AUTHORIZATION_PDF_URL}?user_id=N   (secret-authenticated, same header as
++# the upload endpoints) and attach it to every CCPA/GDPR email. A user who
++# has not signed yet (404) sends without it, as before.
++AUTHORIZATION_PDF_URL = os.getenv(
++    "AUTHORIZATION_PDF_URL", "https://privacyduck.com/authorization_api/pdf")
++_AUTH_PDF_CACHE = {}          # user_id -> (bytes | None, fetched_at)
++_AUTH_PDF_CACHE_TTL = 6 * 3600
++
++
++def fetch_authorization_pdf(user_id):
++    """Signed authorization PDF bytes for user_id, or None. Cached 6h."""
++    try:
++        uid = int(user_id or 0)
++    except (TypeError, ValueError):
++        return None
++    if uid <= 0:
++        return None
++    hit = _AUTH_PDF_CACHE.get(uid)
++    if hit and time.time() - hit[1] < _AUTH_PDF_CACHE_TTL:
++        return hit[0]
++    secret = os.getenv("PD_UPLOAD_SECRET", "").strip()
++    data = None
++    if secret:
++        try:
++            import requests
++            r = requests.get(AUTHORIZATION_PDF_URL, params={"user_id": uid},
++                             headers={"X-PD-Upload-Secret": secret}, timeout=20)
++            if r.status_code == 200 and r.content.startswith(b"%PDF"):
++                data = r.content
++            elif r.status_code != 404:
++                log.warning("authorization pdf: HTTP %s for user %s", r.status_code, uid)
++        except Exception as e:  # network blip must never block the request itself
++            log.warning("authorization pdf fetch failed for user %s: %s", uid, e)
++    _AUTH_PDF_CACHE[uid] = (data, time.time())
++    return data
++
++
+ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
+                            run_mode="non-headless"):
+     """Send a CCPA-compliant opt-out + deletion request to the broker's
+@@ -906,6 +947,7 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
+     user_state = (dataRow.get("State") or "").strip()
+     user_zip = (dataRow.get("Zipcode") or "").strip()
+     profile_url = (dataRow.get("Profile URL") or "").strip()
++    auth_pdf = fetch_authorization_pdf(dataRow.get("__user_id__"))
+ 
+     if not user_email or not user_name:
+         raise RuntimeError("dataRow missing Name or User Email; cannot send CCPA request")
+@@ -944,8 +986,10 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
+         "reaches the consumer immediately.\n\n"
+         "This request is submitted by PrivacyDuck (https://privacyduck.com),\n"
+         "an authorized privacy-rights agent acting on the consumer's\n"
+-        "behalf pursuant to CCPA Sec. 1798.140(d) and 11 CCR 7063.\n\n"
+-        "Please confirm receipt and processing directly to the consumer\n"
++        "behalf pursuant to CCPA Sec. 1798.140(d) and 11 CCR 7063.\n"
++        + ("The consumer's signed authorization is attached\n"
++           "(PrivacyDuck-Authorization.pdf).\n\n" if auth_pdf else "\n")
++        + "Please confirm receipt and processing directly to the consumer\n"
+         "at the email address above.\n\n"
+         "Thank you for your prompt compliance.\n\n"
+         "-- Sent by PrivacyDuck on behalf of " + user_name + "\n"
+@@ -959,6 +1003,9 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
+     msg["Subject"] = subject
+     msg["Date"] = formatdate(localtime=True)
+     msg.set_content(body)
++    if auth_pdf:
++        msg.add_attachment(auth_pdf, maintype="application", subtype="pdf",
++                           filename="PrivacyDuck-Authorization.pdf")
+ 
+     # Aggregate daily throttle (changed 2026-05-29 from per-user 10/day to
+     # global 50/day). Raises CCPADailyLimitReached when the GLOBAL counter
+diff --git a/manage.py b/manage.py
+index fb748e7..0976eb3 100644
+--- a/manage.py
++++ b/manage.py
+@@ -91,14 +91,27 @@ from lib.automation_delay import enable_automation_delays
+ # the history away, which is why the July outage had no trail to read.
+ # Rotation caps disk use at ~50MB — this machine already died once from an
+ # unbounded directory, so nothing here may grow forever.
+-_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
++# Where: PD_LOG_DIR if set, else <this dir>/logs. Two files, both rotated:
++#   removal.log          size-rotated (10MB x 4) — the running tail
++#   removal-YYYY-MM-DD.log  one file per calendar day, kept 14 days
++# The per-day file exists because after a restart the size-rotated
++# removal.log.1 looked like "today's log" but was the previous run's tail,
++# and the new run had only written a few KB to removal.log (2026-09-21).
++# With daily files, "what happened on the 20th" is always one file.
++_LOG_DIR = os.getenv("PD_LOG_DIR", "").strip() or os.path.join(
++    os.path.dirname(os.path.abspath(__file__)), "logs")
+ _log_handlers = [logging.StreamHandler(sys.stderr)]
+ try:
+     os.makedirs(_LOG_DIR, exist_ok=True)
+-    from logging.handlers import RotatingFileHandler
++    from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
+     _log_handlers.append(RotatingFileHandler(
+         os.path.join(_LOG_DIR, "removal.log"),
+         maxBytes=10 * 1024 * 1024, backupCount=4, encoding="utf-8"))
++    _daily = TimedRotatingFileHandler(
++        os.path.join(_LOG_DIR, "removal-daily.log"),
++        when="midnight", backupCount=14, encoding="utf-8", utc=False)
++    _daily.suffix = "%Y-%m-%d.log"
++    _log_handlers.append(_daily)
+ except OSError as _e:
+     print("WARNING: file logging unavailable: %s" % _e, file=sys.stderr)
+ logging.basicConfig(
+@@ -109,6 +122,7 @@ logging.basicConfig(
+ logging.getLogger("socketio").setLevel(logging.ERROR)
+ logging.getLogger("engineio").setLevel(logging.ERROR)
+ log = logging.getLogger("pd.removal")
++log.info("log files: %s (removal.log size-rotated; removal-daily.log.YYYY-MM-DD.log per day)", _LOG_DIR)
+ 
+ # ----- environment patches (2026-09-18 log review: 2,340 failures / 85
+ # successes in six days, 70% ElementNotFoundError spread evenly over ~110
+@@ -553,12 +567,50 @@ def get_pending_google_scan(conn):
+     """)
+ 
+ 
++_SCAN_MODULES_CACHE = None
++
++
++def _real_scan_domains():
++    """Domains that have a REAL sites_scan module (not an auto-generated stub).
++
++    408 of the 416 scan modules are stubs that raise ModuleNotFoundError.
++    Fetching their rows one by one and marking each step=4 cost ~0.3s per
++    row — about two minutes per user per (re)scan — and starved the five
++    real scans (the free-scan flow) behind them in the same queue
++    (2026-09-21). Selecting only real domains removes that entirely; stub
++    rows stay at step=0 and are simply never picked up. Cached per run.
++    """
++    global _SCAN_MODULES_CACHE
++    if _SCAN_MODULES_CACHE is None:
++        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sites_scan")
++        real = []
++        for name in os.listdir(base):
++            if not name.endswith(".py") or name.startswith("_"):
++                continue
++            try:
++                with open(os.path.join(base, name), "r", encoding="utf-8", errors="ignore") as fh:
++                    src = fh.read()
++            except OSError:
++                continue
++            if "raise ModuleNotFoundError" in src or "auto-generated stub" in src:
++                continue
++            real.append(name[:-3])
++        _SCAN_MODULES_CACHE = real
++        log.info("scan: %d real scan modules (%d stubs skipped)", len(real), len(os.listdir(base)) - len(real))
++    return _SCAN_MODULES_CACHE
++
++
+ def get_pending_scan(conn):
++    domains = _real_scan_domains()
++    if not domains:
++        return []
++    placeholders = ",".join(["%s"] * len(domains))
+     return _fetch_pending(conn, """
+         SELECT t.*, u.email, u.firstname, u.lastname, u.city, u.zip, u.state, u.age
+-        FROM (SELECT * FROM results WHERE step = 0 AND kind = 0 LIMIT 1000) AS t
++        FROM (SELECT * FROM results WHERE step = 0 AND kind = 0
++                AND target_domain IN (""" + placeholders + """) LIMIT 1000) AS t
+         LEFT JOIN users u ON t.user_id = u.id
+-    """)
++    """, tuple(domains))
+ 
+ 
+ _CCPA_DOMAINS_CACHE = None
+-- 
+2.43.0
+

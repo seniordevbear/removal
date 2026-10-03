@@ -1,0 +1,508 @@
+From 44031c5a5811435fffa4daa1d5ead9b9c31486f9 Mon Sep 17 00:00:00 2001
+From: max994-dev <bmax994@outlook.com>
+Date: Thu, 24 Sep 2026 18:57:31 +0000
+Subject: [PATCH 3/6] OneTrust state options: match on full name or code
+ instead of the raw profile value
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- lib/broker_helpers.py: add select_onetrust_state(). OneTrust DSAR forms
+  label their <vt-option> entries with the FULL state name ("Texas"), but 13
+  scripts interpolated dataRow["State"] straight into the selector, so a
+  "TX" profile looked for an option labelled "Tx" and raised
+  ElementNotFoundError — 82 failures in the 2026-09-21..24 run. The helper
+  tries the full name, the raw value and the upper-case code against both
+  aria-label and text(), and raises naming the real cause when none match.
+
+- sites/datatrustcom.py had the worse variant: a raw usaStateDictionary
+  lookup that KeyErrors on "TX", with an else-branch that clicked
+  vt-option[0] — filing the deletion request under whatever state happened
+  to be first in the list rather than failing. Now it raises.
+
+- lib/broker_helpers.py: the *arrests.org name covers two different
+  platforms. Only some (indianaarrests.org) run the WPForms portal; the rest
+  (dcarrests.org, marylandarrests.org, the Carolinas, Idaho) have no opt-out
+  portal at all and expose only a Contact Form 7 at /contact-form. Submit a
+  CCPA/CPRA deletion request there before declaring "no form", which is the
+  documented route for those sites.
+
+- sites/ (15 scripts): call the helper instead of interpolating the state.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ lib/broker_helpers.py         | 104 +++++++++++++++++++++++++++++++++-
+ sites/acxiomcom.py            |   3 +-
+ sites/affinitysolutionscom.py |   3 +-
+ sites/analyticsiqcom.py       |   3 +-
+ sites/buyerlinkcom.py         |   3 +-
+ sites/bytwocom.py             |   3 +-
+ sites/careerbuildercom.py     |   3 +-
+ sites/costarcom.py            |   3 +-
+ sites/datatrustcom.py         |   9 +--
+ sites/eltorocom.py            |   3 +-
+ sites/i360com.py              |   3 +-
+ sites/idstrongcom.py          |   3 +-
+ sites/internetbrandscom.py    |   3 +-
+ sites/irysus.py               |   3 +-
+ sites/mediawallahcom.py       |   3 +-
+ sites/spglobalcom.py          |   3 +-
+ 16 files changed, 135 insertions(+), 20 deletions(-)
+
+diff --git a/lib/broker_helpers.py b/lib/broker_helpers.py
+index c022aa4..d0ceb22 100644
+--- a/lib/broker_helpers.py
++++ b/lib/broker_helpers.py
+@@ -543,6 +543,39 @@ def select_state(select_ele, raw, timeout=4.0):
+     raise RuntimeError("no state option matched; tried " + repr(cands))
+ 
+ 
++def select_onetrust_state(container, raw, timeout=3):
++    """Click the state option on a OneTrust DSAR form (<vt-option>).
++
++    OneTrust labels these options with the FULL state name ("Texas"), while
++    profiles hold a mix of "TX", "Texas" and free text. 13 scripts passed
++    dataRow["State"] straight into the selector, so a "TX" profile searched
++    for an option literally labelled "Tx" and raised ElementNotFoundError
++    (82 failures in the 2026-09-21..24 run); datatrustcom did a raw dict
++    lookup that KeyErrors on "TX". Tries full name, the raw value and the
++    upper-case code, against both aria-label and text(), then fails with a
++    message naming the real problem. Returns True when a click landed.
++    """
++    raw = (raw or "").strip()
++    if not raw:
++        raise RuntimeError("state option not found on OneTrust form; profile state is ''")
++    cands = []
++    for c in (_state_full_name(raw), raw, raw.upper(), raw.title()):
++        if c and c not in cands:
++            cands.append(c)
++    for c in cands:
++        for sel in (f"tag:vt-option@@aria-label={c}",
++                    f"tag:vt-option@@text()= {c} ",
++                    f"tag:vt-option@@text():{c}"):
++            try:
++                opt = container.ele(sel, timeout=timeout)
++            except Exception:
++                opt = None
++            if opt:
++                opt.click()
++                return True
++    raise RuntimeError("no state option matched; tried %r" % (cands,))
++
++
+ def _state_full_name(raw):
+     """User profile might store state as 'CA' or 'California'. The dropdown
+     on the request portal wants the full name. Normalize."""
+@@ -554,6 +587,63 @@ def _state_full_name(raw):
+     return raw
+ 
+ 
++def _submit_arrests_contact_form(page, broker_name, base, dataRow):
++    """Fallback for *arrests.org sites with no opt-out portal (2026-09-24).
++
++    Those run Contact Form 7 at /contact-form with your-name / your-email /
++    your-message. We submit a CCPA/CPRA deletion request naming the consumer
++    and their address. Returns True when the form was filled and submitted.
++    """
++    try:
++        page.get(base + "/contact-form")
++        time.sleep(2.5)
++        try:
++            dismiss_common_consents(page, broker_name)
++        except Exception:
++            pass
++        name_el = page.ele("css:input[name='your-name']", timeout=4)
++        mail_el = page.ele("css:input[name='your-email']", timeout=2)
++        msg_el = page.ele("css:textarea[name='your-message']", timeout=2)
++        if not (name_el and mail_el and msg_el):
++            log_step(broker_name, "contact form not present either", logging.WARNING)
++            return False
++
++        consumer = (dataRow.get("Name") or "").strip()
++        city = (dataRow.get("City") or "").strip()
++        state = (dataRow.get("State") or "").strip()
++        addr = (dataRow.get("Address") or dataRow.get("Street") or "").strip()
++        zipc = (dataRow.get("Zipcode") or "").strip()
++        reply_to = (dataRow.get("User Email") or "").strip()
++        where = ", ".join(x for x in (addr, city, " ".join(y for y in (state, zipc) if y)) if x)
++        body = (
++            "Request to delete personal information (CCPA/CPRA Sec. 1798.105 "
++            "and equivalent state law).\n\n"
++            "Please remove all records and listings for the consumer below "
++            "from " + broker_name + " and stop selling or sharing their "
++            "personal information:\n\n"
++            "  Name:    " + consumer + "\n"
++            "  Address: " + (where or "(on file)") + "\n"
++            "  Email:   " + reply_to + "\n\n"
++            "This request is submitted by PrivacyDuck (privacyduck.com) as the "
++            "consumer's authorized agent. Please confirm the removal by reply."
++        )
++        name_el.click(); name_el.input(consumer or "PrivacyDuck")
++        mail_el.click(); mail_el.input(reply_to)
++        msg_el.click(); msg_el.input(body)
++        time.sleep(0.5)
++        btn = page.ele("css:input[type=submit], css:button[type=submit]", timeout=3)
++        if not btn:
++            log_step(broker_name, "contact form has no submit button", logging.WARNING)
++            return False
++        btn.click()
++        time.sleep(4)
++        log_step(broker_name, "CCPA deletion request submitted via /contact-form")
++        return True
++    except Exception as e:
++        log_step(broker_name, "contact-form fallback failed: %s" % e, logging.WARNING)
++        return False
++
++
+ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
+     """Generic opt-out for the arrests.org / courtrecords.us site family
+     (53 broker scripts delegate here).
+@@ -626,12 +716,22 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
+                     found = True
+                     break
+             if not found:
++                # 2026-09-24: the *arrests.org name covers TWO platforms. Only
++                # some (indianaarrests.org) run the WPForms portal; the rest
++                # (dcarrests.org, marylandarrests.org, nc/nd/idaho...) are a
++                # different build with no opt-out portal at all — their privacy
++                # page names no address and their only channel is a Contact
++                # Form 7 at /contact-form. Submitting a CCPA deletion request
++                # there is the documented route, so try it before giving up.
++                if _submit_arrests_contact_form(page, broker_name, base, dataRow):
++                    return screenshot_step(page, broker_name, "contact_form_submitted") \
++                        or screenshot_step(page, broker_name, "submitted")
+                 screenshot_path = screenshot_step(page, broker_name, "no_form")
+                 raise RuntimeError(
+                     broker_name + ": no opt-out form at any known path "
+                     "(/the-privacy-request-portal/, /privacy-request-portal, "
+-                    "/optout/, /request-portal) — site layout changed, "
+-                    "script needs a survey")
++                    "/optout/, /request-portal) and no /contact-form — "
++                    "site layout changed, script needs a survey")
+ 
+             # -- consent toggles: WPForms uses checkboxes, older layouts used
+             #    radios. Try both input types for each concept; missing is a
+diff --git a/sites/acxiomcom.py b/sites/acxiomcom.py
+index 7f0262f..3519bf8 100644
+--- a/sites/acxiomcom.py
++++ b/sites/acxiomcom.py
+@@ -7,6 +7,7 @@ import os, datetime, pyautogui, requests
+ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from cloudsolver.extension import proxies
++from lib.broker_helpers import select_onetrust_state
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -100,7 +101,7 @@ def fill_input_data(page, dataRow) :
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     zip_input = page.ele("tag:input@@id=zipDSARElement")
+     zip_input.click()
+diff --git a/sites/affinitysolutionscom.py b/sites/affinitysolutionscom.py
+index 5a4ce09..bee812b 100644
+--- a/sites/affinitysolutionscom.py
++++ b/sites/affinitysolutionscom.py
+@@ -6,6 +6,7 @@ import os, datetime, pyautogui, requests
+ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from cloudsolver.extension import proxies
++from lib.broker_helpers import select_onetrust_state
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -75,7 +76,7 @@ def fill_input_data(page, dataRow) :
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     zip_input = page.ele("tag:input@@id=zipDSARElement")
+     zip_input.click()
+diff --git a/sites/analyticsiqcom.py b/sites/analyticsiqcom.py
+index 3cf6401..012350c 100644
+--- a/sites/analyticsiqcom.py
++++ b/sites/analyticsiqcom.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from DrissionPage.common import Keys
+ from lib.email_verification import do_email_verification
++from lib.broker_helpers import select_onetrust_state
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -89,7 +90,7 @@ def fill_input_data(page, dataRow) :
+     state_input = page.ele("tag:input@@id=stateDSARElement")
+     state_input.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     zip_input = page.ele("tag:input@@id=zipDSARElement")
+     zip_input.click()
+diff --git a/sites/buyerlinkcom.py b/sites/buyerlinkcom.py
+index 15650dd..34a75dc 100644
+--- a/sites/buyerlinkcom.py
++++ b/sites/buyerlinkcom.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from DrissionPage.common import Keys
+ from lib.email_verification import do_email_verification
++from lib.broker_helpers import select_onetrust_state
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -93,7 +94,7 @@ def fill_input_data(page, dataRow) :
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@text()= {dataRow["State"]} ").click()
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     detail_input = page.ele("tag:textarea@@id=requestDetailsDSARElement")
+     detail_input.click()
+diff --git a/sites/bytwocom.py b/sites/bytwocom.py
+index e390292..9f81579 100644
+--- a/sites/bytwocom.py
++++ b/sites/bytwocom.py
+@@ -6,6 +6,7 @@ import os, datetime, pyautogui, requests
+ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from cloudsolver.extension import proxies
++from lib.broker_helpers import select_onetrust_state
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -94,7 +95,7 @@ def fill_input_data(page, dataRow) :
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+     
+ 
+     zip_input = page.ele("tag:input@@id=zipDSARElement")
+diff --git a/sites/careerbuildercom.py b/sites/careerbuildercom.py
+index 2483d10..47062e3 100644
+--- a/sites/careerbuildercom.py
++++ b/sites/careerbuildercom.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from lib.email_verification import do_email_verification
+ from cloudsolver.extension import proxies
++from lib.broker_helpers import select_onetrust_state
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -100,7 +101,7 @@ def fill_input_data(page, dataRow) :
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@text()= {dataRow["State"]} ").click()
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     detail_input = page.ele("tag:textarea@@id=requestDetailsDSARElement")
+     detail_input.click()
+diff --git a/sites/costarcom.py b/sites/costarcom.py
+index f20b64a..f2e74f0 100644
+--- a/sites/costarcom.py
++++ b/sites/costarcom.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from lib.email_verification import do_email_verification
+ from cloudsolver.extension import proxies
++from lib.broker_helpers import select_onetrust_state
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -66,7 +67,7 @@ def fill_input_data(page, dataRow) :
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     user_select = page.ele("tag:input@@id=formField74DSARElement")
+     user_select.click()
+diff --git a/sites/datatrustcom.py b/sites/datatrustcom.py
+index b297f10..49444c4 100644
+--- a/sites/datatrustcom.py
++++ b/sites/datatrustcom.py
+@@ -7,6 +7,7 @@ from twocaptcha import TwoCaptcha
+ from lib.common import generate_email, generate_phone_number
+ from lib.email_verification import do_email_verification
+ from cloudsolver.extension import proxies
++from lib.broker_helpers import select_onetrust_state
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -91,10 +92,10 @@ def fill_input_data(page, dataRow) :
+     state_select = iframe_container.ele("tag:input@@id=formField19DSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    if iframe_container.ele(f"tag:vt-option@@aria-label={usaStateDictionary[dataRow['State']]}") != None :
+-       iframe_container.ele(f"tag:vt-option@@aria-label={usaStateDictionary[dataRow['State']]}").click() 
+-    else :
+-        iframe_container.eles("tag:vt-option")[0].click()
++    # was usaStateDictionary[...] (KeyError on "TX") with an else-branch that
++    # clicked vt-option[0] — i.e. filed the request under the WRONG state
++    # rather than failing. The helper raises instead (2026-09-24).
++    select_onetrust_state(iframe_container, dataRow["State"])
+ 
+     zip_input = iframe_container.ele("tag:input@@id=zipDSARElement")
+     zip_input.click()
+diff --git a/sites/eltorocom.py b/sites/eltorocom.py
+index 9bad35b..f465c23 100644
+--- a/sites/eltorocom.py
++++ b/sites/eltorocom.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from lib.email_verification import do_email_verification
+ from cloudsolver.extension import proxies
+ from twocaptcha import TwoCaptcha
++from lib.broker_helpers import select_onetrust_state
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -104,7 +105,7 @@ def fill_input_data(page, dataRow) :
+     state_select = iframe_container.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    iframe_container.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
++    select_onetrust_state(iframe_container, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     zip_input = iframe_container.ele("tag:input@@id=zipDSARElement")
+     zip_input.click()
+diff --git a/sites/i360com.py b/sites/i360com.py
+index 0fd5f8f..5fd593c 100644
+--- a/sites/i360com.py
++++ b/sites/i360com.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from lib.email_verification import do_email_verification
+ from twocaptcha import TwoCaptcha
+ from cloudsolver.extension import proxies
++from lib.broker_helpers import select_onetrust_state
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -65,7 +66,7 @@ def fill_input_data(page, dataRow) :
+     state_select = page.ele("tag:input@@id=formField40DSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     fName_input = page.ele("tag:input@@id=firstNameDSARElement")  
+     fName_input.click()
+diff --git a/sites/idstrongcom.py b/sites/idstrongcom.py
+index 6d82c32..5611e8b 100644
+--- a/sites/idstrongcom.py
++++ b/sites/idstrongcom.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from lib.email_verification import do_email_verification
+ from cloudsolver.extension import proxies
+ from twocaptcha import TwoCaptcha
++from lib.broker_helpers import select_onetrust_state
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -63,7 +64,7 @@ def fill_input_data(page, dataRow) :
+     state_select = iframe_container.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    iframe_container.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
++    select_onetrust_state(iframe_container, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     request_man = iframe_container.ele("tag:span@@text()= Myself ")
+     request_man.click()
+diff --git a/sites/internetbrandscom.py b/sites/internetbrandscom.py
+index 4115f0f..fc9711d 100644
+--- a/sites/internetbrandscom.py
++++ b/sites/internetbrandscom.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from lib.email_verification import do_email_verification
+ from DrissionPage.common import Keys
++from lib.broker_helpers import select_onetrust_state
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+ solver = TwoCaptcha(api_key)
+@@ -60,7 +61,7 @@ def fill_input_data(page, dataRow) :
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()    
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)    
+     
+     sleep(1)
+     request_man = page.ele("tag:span@@text()= User ")
+diff --git a/sites/irysus.py b/sites/irysus.py
+index 6b69186..8034c78 100644
+--- a/sites/irysus.py
++++ b/sites/irysus.py
+@@ -6,6 +6,7 @@ import os, datetime, pyautogui, requests
+ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha 
+ from cloudsolver.extension import proxies
++from lib.broker_helpers import select_onetrust_state
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -92,7 +93,7 @@ def fill_input_data(page, dataRow) :
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+ def irysus(dataRow, website_name, in_user_email, run_mode) : 
+     page = None
+diff --git a/sites/mediawallahcom.py b/sites/mediawallahcom.py
+index a0a2b03..e7a7073 100644
+--- a/sites/mediawallahcom.py
++++ b/sites/mediawallahcom.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from lib.email_verification import do_email_verification
+ from cloudsolver.extension import proxies
+ from twocaptcha import TwoCaptcha
++from lib.broker_helpers import select_onetrust_state
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -92,7 +93,7 @@ def fill_input_data(page, dataRow) :
+     state_select = iframe_container.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    iframe_container.ele(f"tag:vt-option@@text():{dataRow["State"]}").click()
++    select_onetrust_state(iframe_container, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     textarea_input = iframe_container.ele("tag:textarea@@id=undefined")
+     textarea_input.click()
+diff --git a/sites/spglobalcom.py b/sites/spglobalcom.py
+index b6cb8c4..b43fb7c 100644
+--- a/sites/spglobalcom.py
++++ b/sites/spglobalcom.py
+@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from lib.email_verification import do_email_verification
+ from cloudsolver.extension import proxies
++from lib.broker_helpers import select_onetrust_state
+ 
+ 
+ api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+@@ -69,7 +70,7 @@ def fill_input_data(page, dataRow) :
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+-    page.ele(f"tag:vt-option@@aria-label={dataRow["State"]}").click()
++    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+ 
+     sender_type = page.ele("tag:span@@text()= Customer ")
+     sender_type.click()
+-- 
+2.43.0
+

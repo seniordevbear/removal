@@ -1,0 +1,378 @@
+From 62bbb410e7e3238ae9b79a3bd1bda801edf89e32 Mon Sep 17 00:00:00 2001
+From: max994-dev <bmax994@outlook.com>
+Date: Sat, 3 Oct 2026 14:19:41 +0000
+Subject: [PATCH 5/6] Pipeline: retry transient DOM errors, quarantine dead
+ brokers, log successes, DB retry, scan empty-name
+
+From the 24 Sep - 2 Oct daily logs (~240k lines):
+
+- ~440 crashes/day were DrissionPage element-timing errors on brokers that
+  succeed 60-70% of the time (acbjcom 101 ok / 58 crash, accudatacom 134/57,
+  archivescom 130/61, ...). Each crash cost a day: requeued, retried tomorrow.
+  A transient DOM error now gets one immediate retry in a fresh browser
+  (REMOVAL_TRANSIENT_RETRIES, default 1) before it counts as a crash.
+- advancedbackgroundcheckscom has never succeeded and still got 57 attempts in
+  nine days. Brokers with >= DEAD_DOMAIN_FAILS failures and no success in 7 days
+  are held back from bulk selection; their daily probe row still runs so a
+  repaired script is noticed within a day.
+- Successes were never logged (_set_step only logged when a reason was given),
+  so the logs could not show a success rate. Every transition is logged now.
+- The managed DB drops connections occasionally ('Lost connection', connect
+  timeouts): a tick died on the first hiccup. _db_connect() retries 3x.
+- Scan scripts start with Name.split()[0]; an account with no name crashed as
+  IndexError and was recorded as a broken broker (41 times). It is now
+  IncompletePII -> step 5 (needs customer data) in both scan loops.
+- A None proxy extension crashed browser setup instead of running without one.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ __scan.py             |   5 ++
+ __scanGoogle.py       |   5 ++
+ lib/broker_helpers.py |   8 ++-
+ manage.py             | 138 +++++++++++++++++++++++++++++++++++-------
+ 4 files changed, 131 insertions(+), 25 deletions(-)
+
+diff --git a/__scan.py b/__scan.py
+index 209678e..84a76ce 100644
+--- a/__scan.py
++++ b/__scan.py
+@@ -74,6 +74,11 @@ def scan(sio, target_domain, req_id, user_id, email, firstname, lastname,
+         )
+         raise
+ 
++    # 2026-10-03: every scan script starts with Name.split()[0]; an account
++    # with no name crashed as IndexError and was recorded as a broken broker.
++    if not str(data_row.get("Name", "")).strip():
++        from __removal import IncompletePII
++        raise IncompletePII(["Name"])
+     fn = getattr(module, target_domain, None)
+     if not callable(fn):
+         raise AttributeError(
+diff --git a/__scanGoogle.py b/__scanGoogle.py
+index 942ede5..10455b7 100644
+--- a/__scanGoogle.py
++++ b/__scanGoogle.py
+@@ -50,6 +50,11 @@ def google_scan(sio, target_domain, req_id, user_id, email, firstname,
+             flush=True,
+         )
+         raise
++    # 2026-10-03: every scan script starts with Name.split()[0]; an account
++    # with no name crashed as IndexError and was recorded as a broken broker.
++    if not str(data_row.get("Name", "")).strip():
++        from __removal import IncompletePII
++        raise IncompletePII(["Name"])
+     fn = getattr(module, target_domain, None)
+     if not callable(fn):
+         raise AttributeError(
+diff --git a/lib/broker_helpers.py b/lib/broker_helpers.py
+index fe99788..467daf6 100644
+--- a/lib/broker_helpers.py
++++ b/lib/broker_helpers.py
+@@ -407,8 +407,12 @@ def safe_chromium_for_broker(
+     if use_proxy:
+         try:
+             from lib.proxies import get_proxy_extension
+-            opts.add_extension(get_proxy_extension())
+-            log_step(broker, "proxy extension added")
++            _ext = get_proxy_extension()
++            if _ext:
++                opts.add_extension(_ext)
++                log_step(broker, "proxy extension added")
++            else:
++                log_step(broker, "proxy extension unavailable (None) — running without proxy", logging.WARNING)
+         except Exception as e:
+             log_step(broker, f"proxy setup failed: {e}", logging.WARNING)
+ 
+diff --git a/manage.py b/manage.py
+index 0976eb3..ddb728f 100644
+--- a/manage.py
++++ b/manage.py
+@@ -451,6 +451,23 @@ _ERR_KEY = "$.pipeline_last_error"
+ _ERR_AT_KEY = "$.pipeline_last_error_at"
+ 
+ 
++def _db_connect(attempts=3, backoff=2.0):
++    """mysql.connector.connect with retry. The managed DB occasionally drops
++    the connection or times out (seen in the 24 Sep-2 Oct logs: 'Lost
++    connection to MySQL server', 'connection attempt failed'); a whole tick
++    used to die on the first hiccup."""
++    last = None
++    for i in range(attempts):
++        try:
++            return mysql.connector.connect(**db_config)
++        except Exception as e:  # InterfaceError / OperationalError / socket
++            last = e
++            if i < attempts - 1:
++                log.warning("db connect failed (%d/%d): %s — retrying", i + 1, attempts, e)
++                time.sleep(backoff * (i + 1))
++    raise last
++
++
+ def _set_step(conn, row_id, new_step, reason=None):
+     """Single source of truth for step transitions. Parameterized.
+ 
+@@ -484,8 +501,9 @@ def _set_step(conn, row_id, new_step, reason=None):
+             cur.execute("UPDATE results SET step = %s WHERE id = %s",
+                         (new_step, row_id))
+         conn.commit()
+-        if reason:
+-            log.info("step %s -> id=%s reason=%s", new_step, row_id, reason)
++        # 2026-10-03: successes used to be silent, so the daily logs showed
++        # only failures and no success rate could be read from them.
++        log.info("step %s -> id=%s reason=%s", new_step, row_id, reason or "-")
+     finally:
+         cur.close()
+ 
+@@ -640,7 +658,43 @@ def _ccpa_email_domains():
+     return _CCPA_DOMAINS_CACHE
+ 
+ 
++_dead_cache = {"at": 0.0, "domains": ()}
++DEAD_DOMAIN_FAILS = _get_env_int("DEAD_DOMAIN_FAILS", 3)
++
++
++def _dead_domains(conn):
++    """Brokers with >= DEAD_DOMAIN_FAILS failures and NO success in the last
++    7 days. Their pending rows are held back from bulk selection — only the
++    daily probe row (_probe_dead_domains) runs, so a repaired script is still
++    noticed within a day. advancedbackgroundcheckscom had 0 successes ever and
++    still got 57 attempts in nine days. Cached 10 min per process."""
++    now = time.time()
++    if now - _dead_cache["at"] < 600:
++        return _dead_cache["domains"]
++    doms = ()
++    try:
++        cur = conn.cursor()
++        try:
++            cur.execute(
++                "SELECT target_domain FROM results "
++                "WHERE kind = 1 AND step IN (2, 3) AND updated_at >= NOW() - INTERVAL 7 DAY "
++                "GROUP BY target_domain "
++                "HAVING SUM(step = 2) = 0 AND SUM(step = 3) >= %s",
++                (DEAD_DOMAIN_FAILS,))
++            doms = tuple(r[0] for r in cur.fetchall())
++        finally:
++            cur.close()
++        if set(doms) != set(_dead_cache["domains"]):
++            log.info("quarantined brokers (no success in 7d): %d %s", len(doms), ",".join(sorted(doms))[:400])
++    except Exception:
++        log.exception("dead-domain query failed; selecting without quarantine")
++    _dead_cache["at"] = now
++    _dead_cache["domains"] = doms
++    return doms
++
++
+ def get_pending_removal(conn, exclude_domains=()):
++    dead = _dead_domains(conn)
+     # FAIRNESS FIX 2026-05-28: previous version had
+     #   ORDER BY user_id ASC LIMIT 1000
+     # which monopolized the first ~5 user_ids (they had 1164+ rows
+@@ -675,6 +729,7 @@ def get_pending_removal(conn, exclude_domains=()):
+             FROM results
+             WHERE step = 0 AND kind = 1 AND planable = 1 {exclude_clause}
+               {paid_clause}
++              {dead_clause}
+         ) ranked
+         LEFT JOIN users u ON u.id = ranked.user_id
+         WHERE ranked.rn <= 10
+@@ -687,6 +742,11 @@ def get_pending_removal(conn, exclude_domains=()):
+     """.format(exclude_clause=(
+         "AND target_domain NOT IN (" + ",".join(["%s"] * len(exclude_domains)) + ")"
+         if exclude_domains else ""
++    ), dead_clause=(
++        # held-back brokers: only their daily probe row may be selected
++        "AND (target_domain NOT IN (" + ",".join(["%s"] * len(dead)) + ") "
++        "     OR JSON_UNQUOTE(data->'$.probe_at') = CAST(CURDATE() AS CHAR))"
++        if dead else ""
+     ), paid_clause=(
+         # Must live INSIDE the ranked subquery: filtering after ROW_NUMBER()
+         # would let unpaid rows consume the rn<=10 fairness slots. Mirrors
+@@ -695,7 +755,7 @@ def get_pending_removal(conn, exclude_domains=()):
+                    AND pu.plan_id IS NOT NULL AND pu.plan_id <> 0
+                    AND pu.plan_end IS NOT NULL AND pu.plan_end > NOW())"""
+         if REMOVAL_PAID_USERS_ONLY else ""
+-    )), tuple(exclude_domains))
++    )), tuple(exclude_domains) + tuple(dead))
+ 
+ 
+ def get_pending_face_removal(conn):
+@@ -738,7 +798,7 @@ def process_groups_google_scan():
+     Caller loops; we don't loop internally."""
+     conn = None
+     try:
+-        conn = mysql.connector.connect(**db_config)
++        conn = _db_connect()
+         data = get_pending_google_scan(conn)
+         if not data:
+             return
+@@ -768,6 +828,8 @@ def process_groups_google_scan():
+                     )
+                 except GoogleScanModuleMissing:
+                     _set_step(conn, row["id"], 4, "module_missing")
++                except IncompletePII as e:
++                    _set_step(conn, row["id"], 5, "missing_pii:" + ",".join(e.args[0]))
+                 except Exception:
+                     log.exception("google_scan row failed id=%s", row["id"])
+                     _set_step(conn, row["id"], 3, "broker_raised")
+@@ -789,7 +851,7 @@ def process_groups():
+         process_groups_google_scan()
+         conn = None
+         try:
+-            conn = mysql.connector.connect(**db_config)
++            conn = _db_connect()
+             data = get_pending_scan(conn)
+             if data:
+                 log.info("scan tick: %d rows", len(data))
+@@ -833,6 +895,8 @@ def process_groups():
+                                 )
+                         except (ScanModuleMissing, NotImplementedError):
+                             _set_step(conn, row["id"], 4, "module_missing")
++                        except IncompletePII as e:
++                            _set_step(conn, row["id"], 5, "missing_pii:" + ",".join(e.args[0]))
+                         except Exception:
+                             log.exception("scan row failed id=%s", row["id"])
+                             _set_step(conn, row["id"], 3, "broker_raised")
+@@ -869,7 +933,7 @@ def _recover_stale_claims():
+     """
+     conn = None
+     try:
+-        conn = mysql.connector.connect(**db_config)
++        conn = _db_connect()
+         cur = conn.cursor()
+         try:
+             cur.execute(
+@@ -961,7 +1025,7 @@ def _refresh_stale_row_pii():
+     """
+     conn = None
+     try:
+-        conn = mysql.connector.connect(**db_config)
++        conn = _db_connect()
+         cur = conn.cursor()
+         try:
+             cur.execute(
+@@ -1017,7 +1081,7 @@ def _requeue_recovered_pii():
+     """Return step=5 rows to the queue once their owner has a usable name."""
+     conn = None
+     try:
+-        conn = mysql.connector.connect(**db_config)
++        conn = _db_connect()
+         cur = conn.cursor()
+         try:
+             # MySQL forbids LIMIT on a multi-table UPDATE, and forbids a
+@@ -1080,7 +1144,7 @@ def _requeue_fixed_domains():
+     broker that breaks again cannot loop its old failures."""
+     conn = None
+     try:
+-        conn = mysql.connector.connect(**db_config)
++        conn = _db_connect()
+         cur = conn.cursor()
+         try:
+             # Derived table keeps MySQL happy about selecting from the table
+@@ -1137,7 +1201,7 @@ def _probe_dead_domains():
+     fires the full cascade; a still-broken one costs one attempt per day."""
+     conn = None
+     try:
+-        conn = mysql.connector.connect(**db_config)
++        conn = _db_connect()
+         cur = conn.cursor()
+         try:
+             cur.execute(
+@@ -1276,6 +1340,15 @@ _inflight_lock = threading.Lock()
+ # broker script itself is broken and record step=3 (reason=broker_raised),
+ # so a genuinely broken script still cannot loop forever.
+ DOMAIN_CRASHES_BEFORE_GIVEUP = _get_env_int("DOMAIN_CRASHES_BEFORE_GIVEUP", 3)
++REMOVAL_TRANSIENT_RETRIES = _get_env_int("REMOVAL_TRANSIENT_RETRIES", 1)
++
++
++def _is_transient_dom_error(e):
++    """DrissionPage errors that mean 'the page was not ready', not 'the script
++    is wrong': worth one immediate retry in a fresh browser."""
++    return type(e).__name__ in ("ElementNotFoundError", "NoRectError",
++                                "ElementLostError", "JavaScriptError",
++                                "PageDisconnectedError", "TimeoutError")
+ _domain_crashes = {"date": None, "counts": {}}
+ _domain_crashes_lock = threading.Lock()
+ 
+@@ -1303,7 +1376,7 @@ def _process_removal_row(row):
+     user_id_str = str(row["user_id"])
+     conn = None
+     try:
+-        conn = mysql.connector.connect(**db_config)
++        conn = _db_connect()
+         if not _claim_row(conn, row["id"], kind=1, require_planable=True):
+             return
+ 
+@@ -1316,15 +1389,34 @@ def _process_removal_row(row):
+         try:
+             gate = _desktop_gate.desktop() if needs_desktop else _desktop_gate.browser()
+             with gate:
+-                path = removal_dispatch(
+-                    socketio, row["target_domain"], row["site_url"],
+-                    row["id"], row["user_id"],
+-                    row["email"], row["firstname"], row["lastname"],
+-                    row["city"], row["zip"], row["state"], row["age"],
+-                    row["address"], row["phone"],
+-                    row["birth_day"], row["birth_month"], row["birth_year"],
+-                    row["area_code"], row["street"], row["county"],
+-                )
++                # 2026-10-03: in the 24 Sep-2 Oct logs ~440 crashes/day were
++                # DrissionPage element-timing errors on brokers that succeed
++                # 60-70% of the time (acbjcom, accudatacom, archivescom, ...).
++                # Each crash cost a full day: requeued and retried tomorrow.
++                # Retry transient DOM errors once right away, in a fresh
++                # browser, before counting a crash.
++                attempt = 0
++                while True:
++                    try:
++                        path = removal_dispatch(
++                            socketio, row["target_domain"], row["site_url"],
++                            row["id"], row["user_id"],
++                            row["email"], row["firstname"], row["lastname"],
++                            row["city"], row["zip"], row["state"], row["age"],
++                            row["address"], row["phone"],
++                            row["birth_day"], row["birth_month"], row["birth_year"],
++                            row["area_code"], row["street"], row["county"],
++                        )
++                        break
++                    except Exception as e:
++                        if attempt < REMOVAL_TRANSIENT_RETRIES and _is_transient_dom_error(e):
++                            attempt += 1
++                            log.info("transient %s on %s id=%s — retrying (%d/%d)",
++                                     type(e).__name__, row["target_domain"], row["id"],
++                                     attempt, REMOVAL_TRANSIENT_RETRIES)
++                            time.sleep(2)
++                            continue
++                        raise
+             _set_step(conn, row["id"], 2)
+             socketio.emit("complete", {
+                 "id": row["id"], "user_id": row["user_id"],
+@@ -1412,7 +1504,7 @@ def process_groups_removal():
+             elif _ccpa_exclusion_logged[0]:
+                 _ccpa_exclusion_logged[0] = False
+                 log.info("ccpa quota reset — email brokers back in selection")
+-            conn = mysql.connector.connect(**db_config)
++            conn = _db_connect()
+             data = get_pending_removal(conn, exclude_domains=exclude)
+             log.info("removal tick: %d rows (concurrency=%d)", len(data), REMOVAL_CONCURRENCY)
+             conn.close()
+@@ -1455,7 +1547,7 @@ def process_groups_face_removal():
+     while True:
+         conn = None
+         try:
+-            conn = mysql.connector.connect(**db_config)
++            conn = _db_connect()
+             data = get_pending_face_removal(conn)
+             if data:
+                 log.info("face_removal tick: %d rows", len(data))
+@@ -1543,7 +1635,7 @@ def runs(x):
+ 
+ 
+ if "--reset-claims" in sys.argv:
+-    _conn = mysql.connector.connect(**db_config)
++    _conn = _db_connect()
+     try:
+         _cur = _conn.cursor()
+         try:
+-- 
+2.43.0
+
