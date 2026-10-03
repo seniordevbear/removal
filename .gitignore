@@ -58,3 +58,6 @@ __downloaded.mp3
 info.jpeg
 extension.zip
 pkgs.txt
+
+# output of capture_forms.py (page dumps of broker opt-out forms)
+capture_forms/
