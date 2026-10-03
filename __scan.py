@@ -74,6 +74,11 @@ def scan(sio, target_domain, req_id, user_id, email, firstname, lastname,
         )
         raise
 
+    # 2026-10-03: every scan script starts with Name.split()[0]; an account
+    # with no name crashed as IndexError and was recorded as a broken broker.
+    if not str(data_row.get("Name", "")).strip():
+        from __removal import IncompletePII
+        raise IncompletePII(["Name"])
     fn = getattr(module, target_domain, None)
     if not callable(fn):
         raise AttributeError(

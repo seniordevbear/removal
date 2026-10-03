@@ -407,8 +407,12 @@ def safe_chromium_for_broker(
     if use_proxy:
         try:
             from lib.proxies import get_proxy_extension
-            opts.add_extension(get_proxy_extension())
-            log_step(broker, "proxy extension added")
+            _ext = get_proxy_extension()
+            if _ext:
+                opts.add_extension(_ext)
+                log_step(broker, "proxy extension added")
+            else:
+                log_step(broker, "proxy extension unavailable (None) — running without proxy", logging.WARNING)
         except Exception as e:
             log_step(broker, f"proxy setup failed: {e}", logging.WARNING)
 
