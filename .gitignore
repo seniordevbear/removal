@@ -61,3 +61,5 @@ pkgs.txt
 
 # output of capture_forms.py (page dumps of broker opt-out forms)
 capture_forms/
+# patch bundles for the VPS (not source)
+patches/
