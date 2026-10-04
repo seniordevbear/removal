@@ -93,15 +93,15 @@ def fill_input_data(page, dataRow) :
     sleep(random.uniform(0.1,0.5))
     _human_type2(email_confirm_input, email_str)
     
-    country_select = page.ele("tag:input@@id=countryDSARElement")
-    country_select.click()
-    sleep(random.uniform(0.1,0.5))
-    page.ele("tag:vt-option@@text()= United States ").click()
-    
-    state_select = page.ele("tag:input@@id=stateDSARElement")
-    state_select.click()
-    sleep(random.uniform(0.1,0.5))
-    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
+    # 2026-10-04 capture: Country is an autocomplete and the State field is
+    # gone from this form (6/6 runs last week died looking for it). Fill
+    # State only if it comes back.
+    __import__("lib.broker_helpers", fromlist=["select_onetrust_country"]).select_onetrust_country(page)
+    state_select = page.ele("tag:input@@id=stateDSARElement", timeout=2)
+    if state_select:
+        state_select.click()
+        sleep(random.uniform(0.1,0.5))
+        select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
 
     detail_input = page.ele("tag:textarea@@id=requestDetailsDSARElement")
     detail_input.click()

@@ -65,6 +65,12 @@ ROUND2 = {
     "callersmartcom-data": "https://www.callersmart.com/data",
 }
 
+# Round 3: only what is still unseen.
+#     Scripts\python.exe capture_forms.py round3
+ROUND3 = {
+    "callersmartcom-data": "https://www.callersmart.com/data",
+}
+
 
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
@@ -90,11 +96,26 @@ def main():
     log("browser open")
 
     ok = fail = 0
-    targets = ROUND2 if (len(sys.argv) > 1 and sys.argv[1] == "round2") else TARGETS
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    targets = {"round2": ROUND2, "round3": ROUND3}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)
             time.sleep(6)
+            # Cloudflare "Just a moment" interstitial: give it time and nudge
+            # the checkbox the way the broker scripts do (callersmart needed it).
+            for _ in range(12):
+                if "just a moment" not in (page.title or "").lower():
+                    break
+                try:
+                    page.actions.click()
+                    page.actions.key_down("TAB"); time.sleep(0.2); page.actions.key_up("TAB"); time.sleep(0.2)
+                    page.actions.key_down("SPACE"); time.sleep(0.2); page.actions.key_up("SPACE")
+                except Exception:
+                    pass
+                time.sleep(5)
+            if "just a moment" in (page.title or "").lower():
+                log("CF    %-28s still behind the Cloudflare challenge after 60s" % broker)
             with open(os.path.join(OUT, broker + ".html"), "w", encoding="utf-8") as f:
                 f.write(page.html)
             page.get_screenshot(os.path.join(OUT, broker + ".png"), full_page=True)
