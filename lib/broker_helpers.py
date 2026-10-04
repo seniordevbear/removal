@@ -914,14 +914,33 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
             # "This field is required" under each empty box. Treat that as a
             # failure (manage.py -> step 3, retried after the data is fixed),
             # never as a removal.
-            try:
-                html_after = page.html or ""
-            except Exception:
-                html_after = ""
-            if "field is required" in html_after.lower():
-                raise RuntimeError("portal rejected the form: required fields missing "
-                                   "(address/city/state/zip/confirm-email)")
-            log_step(broker_name, "submitted, exiting")
+            # 2026-10-04: the previous check searched the raw HTML for "field
+            # is required" — but every WPForms page embeds that phrase in its
+            # settings JSON (val_required), so EVERY submission on this family
+            # was reported as rejected, accepted or not. Look at what the page
+            # actually rendered: WPForms replaces the form with a confirmation
+            # box on success and shows <em class="wpforms-error"> per bad box.
+            verdict = page.run_js(
+                "var ok=!!document.querySelector("
+                "'.wpforms-confirmation-container-full, .wpforms-confirmation-container, "
+                "div[id^=wpforms-confirmation]');"
+                "var errs=[];document.querySelectorAll("
+                "'.wpforms-error, .wpforms-error-container, label.wpforms-error, em.wpforms-error')"
+                ".forEach(function(e){var t=(e.innerText||'').trim();"
+                "if(t&&e.offsetParent!==null){var f=e.closest('.wpforms-field');"
+                "var l=f?((f.querySelector('label.wpforms-field-label, .wpforms-field-label')||{}).innerText||''):'';"
+                "errs.push((l?l.trim()+': ':'')+t);}});"
+                "var formGone=!document.querySelector('form.wpforms-form');"
+                "return {ok:ok, errs:errs, formGone:formGone};") or {}
+            errs = [e for e in (verdict.get("errs") or []) if e][:8]
+            if errs:
+                raise RuntimeError("portal rejected the form: " + " | ".join(errs))
+            if not (verdict.get("ok") or verdict.get("formGone")):
+                # Neither a confirmation box nor an error: the form is still
+                # sitting there, which means the submit did not go through.
+                raise RuntimeError("portal did not confirm the submission "
+                                   "(form still displayed, no error shown)")
+            log_step(broker_name, "submitted, portal confirmed")
             return screenshot_path
         except Exception:
             # capture what the bot was looking at WHILE the browser is still
