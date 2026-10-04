@@ -1,7 +1,7 @@
 From 36fa98c41c7c5480ed98587931608e292d4d81a3 Mon Sep 17 00:00:00 2001
 From: max994-dev <bmax994@outlook.com>
 Date: Sun, 4 Oct 2026 02:34:50 +0000
-Subject: [PATCH 13/13] run_one.py: run a single broker for a single customer
+Subject: [PATCH 13/14] run_one.py: run a single broker for a single customer
  on demand; Street falls back to Address; demyst postal code
 
 run_one.py <user_id> <broker> [--address ... --city ... --state ... --zip ... --save]

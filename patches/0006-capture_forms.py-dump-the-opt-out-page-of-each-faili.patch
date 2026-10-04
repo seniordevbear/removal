@@ -1,7 +1,7 @@
 From 71b32f4bb47d1b998cdc4de0518e6caa66250c30 Mon Sep 17 00:00:00 2001
 From: max994-dev <bmax994@outlook.com>
 Date: Sat, 3 Oct 2026 20:09:24 +0000
-Subject: [PATCH 06/13] capture_forms.py: dump the opt-out page of each failing
+Subject: [PATCH 06/14] capture_forms.py: dump the opt-out page of each failing
  broker for script repair
 
 Run on the VPS: python capture_forms.py. Opens the worst-crashing brokers'

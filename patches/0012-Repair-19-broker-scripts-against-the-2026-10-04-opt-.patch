@@ -1,7 +1,7 @@
 From 65cb32eeec8a245270817bbad8ed133eb5432952 Mon Sep 17 00:00:00 2001
 From: max994-dev <bmax994@outlook.com>
 Date: Sun, 4 Oct 2026 01:40:47 +0000
-Subject: [PATCH 12/13] Repair 19 broker scripts against the 2026-10-04 opt-out
+Subject: [PATCH 12/14] Repair 19 broker scripts against the 2026-10-04 opt-out
  page captures
 
 capture_forms.py run on the VPS gave the real HTML of the 22 brokers that

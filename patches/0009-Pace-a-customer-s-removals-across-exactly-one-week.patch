@@ -1,7 +1,7 @@
 From 95ebb7cce081ddf2db7b6c292e32bafa170c175b Mon Sep 17 00:00:00 2001
 From: max994-dev <bmax994@outlook.com>
 Date: Sat, 3 Oct 2026 20:52:04 +0000
-Subject: [PATCH 09/13] Pace a customer's removals across exactly one week
+Subject: [PATCH 09/14] Pace a customer's removals across exactly one week
 
 REMOVAL_MIN_INTERVAL_SECONDS 1800 -> 0. manage.py treats a non-positive
 value as "derive from the targets": DAYS*86400/TOTAL = 7*86400/413 = 1464s
