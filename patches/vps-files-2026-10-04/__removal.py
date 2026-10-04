@@ -70,7 +70,10 @@ def _build_data_row(email, firstname, lastname, city, zip, state, age,
         "Address": address or "",
         "Area Code": area_code or "",
         "Phone Number": phone or "",
-        "Street": street or "",
+        # 2026-10-04: the PHP seeders never write data->'$.street', so Street
+        # was "" for every customer and brokers that read dataRow["Street"]
+        # (beenverified, bumper, demyst, affinitysolutions) typed nothing.
+        "Street": street or address or "",
         "Apartment": "",
         "City": city or "",
         "State": state or "",

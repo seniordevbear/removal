@@ -1,20 +1,18 @@
 from DrissionPage import ChromiumPage, ChromiumOptions
 from time import sleep
-import json
 import random
 import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
+from twocaptcha import TwoCaptcha
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
 base_dir = os.getcwd()
 
 screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
-
-print(screentShotDir)
-
 os.makedirs(screentShotDir, exist_ok=True)
 
+usaStateDictionary = { 'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'District of Columbia': 'DC', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY' }
 
 def get_chromium_options(arguments: list) -> ChromiumOptions:
     """
@@ -47,45 +45,43 @@ def _human_type2(element , text: str) -> None:
 def fill_input_data(page, dataRow) : 
     
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-
-    iframe_container = page.ele("tag:iframe")
-    input_elements = iframe_container.eles("tag:input")
-
-    if not input_elements:
-        raise RuntimeError("advancedpeoplesearchcom: opt-out form inputs not found (page changed or did not load) — needs a survey")
-
-    fullName_input = input_elements[0]
+    lName = dataRow["Name"].split()[-1]# split string based on space to get last name 
+    
+    request_type_element = page.ele("tag:select@@id=opt_out_request_request_type")
+    request_type_element.select.by_text("Deletion")
+    
+    fullName_input = page.ele("tag:input@@id=opt_out_request_name")
     fullName_input.click()
-    print("typing the first name...")
+    print("typing the full name...")
     sleep(random.uniform(0.1,0.5))
     _human_type2(fullName_input, dataRow["Name"])
-
-    email_input = input_elements[1]
-    email_input.click()
-    print("typing the email...")
+    
+    address_input = page.ele("tag:input@@id=opt_out_request_street_address")
+    address_input.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
+    _human_type2(address_input, dataRow["Address"])
 
-    phone_input = input_elements[2]
-    phone_input.click()
+
+    city_input = page.ele("tag:input@@id=opt_out_request_city")
+    city_input.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, generate_phone_number())
-
-    country_input = input_elements[3]
-    country_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(country_input, "United States")
-
-    state_input = input_elements[4]
+    _human_type2(city_input, dataRow["City"])
+    
+    state_input = page.ele("tag:input@@id=opt_out_request_state")
     state_input.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(state_input, dataRow["State"])
+    _human_type2(state_input, __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
 
-    submit_button = iframe_container.ele("tag:button@@text()=Submit")
-    submit_button.run_js("this.click();")
+    
+    zip_input = page.ele("tag:input@@id=opt_out_request_postal_code")
+    zip_input.click()
+    sleep(random.uniform(0.1,0.5))
+    _human_type2(zip_input, str(dataRow["Zipcode"]))
 
-def advancedpeoplesearchcom(dataRow, website_name, in_user_email, run_mode) : 
+    check_radio = page.ele("tag:label@@for=opt_out_request_is_authorized_agent_false")
+    check_radio.click()
+
+def fmadatacom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
     try : 
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
@@ -93,11 +89,12 @@ def advancedpeoplesearchcom(dataRow, website_name, in_user_email, run_mode) :
 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\AdvancedPeopleSearchCom_" + fName + "-" + lName + ".png"
+        screenshot_save_path = screentShotDir + "\FmadataCom_" + fName + "-" + lName + ".png"
         
         arguments = [
             "-no-first-run",
             "--start-maximized",
+            # "--incognito",
             "-disable-javascript",
             "-disable-gpu",
             "-disable-sensors",
@@ -108,13 +105,36 @@ def advancedpeoplesearchcom(dataRow, website_name, in_user_email, run_mode) :
             options.headless()
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        page.get("https://www.afternic.com/legal/agreements/do-not-share")
+        page.get("https://www.fmadata.com/opt-out-requests/new")
 
-        sleep(random.uniform(3, 5))
+
+        sleep(random.uniform(0.1,0.5))
+        page.wait.eles_loaded("tag:label@@for=opt_out_request_is_authorized_agent_false")
+        check_radio = page.ele("tag:label@@for=opt_out_request_is_authorized_agent_false")
+        check_radio.click()
 
         fill_input_data(page, dataRow)
 
+        # 2026-10-04 survey: fmadata switched from reCAPTCHA to hCaptcha
+        # (sitekey 1a8ac6e2-0f6c-4e30-b338-e29297cec7b0). 28/31 runs died
+        # looking for the reCAPTCHA iframe.
+        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
+        solver = TwoCaptcha(apiKey)
+        print("hCaptcha is solving...")
+        site_key = "1a8ac6e2-0f6c-4e30-b338-e29297cec7b0"
+        site_url = "https://www.fmadata.com/opt-out-requests/new"
+        result = solver.hcaptcha(sitekey=site_key, url=site_url)
+        Code = result["code"]
+        page.run_js(
+            "var t=arguments[0];"
+            "document.querySelectorAll(\"textarea[name='h-captcha-response'],textarea[name='g-recaptcha-response']\")"
+            ".forEach(function(e){e.style.display='block';e.value=t;});", Code)
+        sleep(1)
 
+        submit_button = page.ele("tag:input@@type=submit")
+        submit_button.click()
+
+        
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)
             print("Success Confirmation API is sent successfully!")

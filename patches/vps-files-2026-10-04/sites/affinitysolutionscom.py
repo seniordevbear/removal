@@ -1,5 +1,4 @@
 from DrissionPage import ChromiumPage, ChromiumOptions
-from DrissionPage.common import Actions,Keys
 from time import sleep
 import json
 import random
@@ -7,7 +6,7 @@ import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
 from cloudsolver.extension import proxies
-from lib.broker_helpers import select_onetrust_state
+from lib.broker_helpers import select_onetrust_state, select_onetrust_country, solve_image_captcha_element
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -51,53 +50,31 @@ def make_standard_num(num) :
     return ret
 
 def fill_input_data(page, dataRow) : 
+    
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-    
+
     sleep(1)
 
-    page.wait.eles_loaded("tag:span@@text()= as Myself ")
-    request_man = page.ele("tag:span@@text()= as Myself ")
+    page.wait.ele_displayed("tag:span@@text()= Myself ")
+    request_man = page.ele("tag:span@@text()= Myself ")
     request_man.click()
 
-    request_type = page.ele("tag:span@@text()= Delete ")
+    request_type = page.ele("tag:span@@text()= Delete My Information ")
     request_type.click()
-
-    email_input = page.ele("tag:input@@id=emailDSARElement")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    email_address = generate_email(dataRow["Name"])
-    _human_type2(email_input, email_address)
-
-    fName_input = page.ele("tag:input@@id=firstNameDSARElement")
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
-
-    lName_input = page.ele("tag:input@@id=lastNameDSARElement")
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    birth_date = make_standard_num(dataRow["Birth Month"]) + "/" + make_standard_num(dataRow["Birth Day"]) + "/" + make_standard_num(dataRow["Birth Year"])
-    birth_input = page.ele("tag:input@@id=dateOfBirthDSARElement")
-    birth_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(birth_input, birth_date)
 
     address_input = page.ele("tag:input@@id=addressDSARElement")
     address_input.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
+    _human_type2(address_input, dataRow["Street"])
 
     city_input = page.ele("tag:input@@id=cityDSARElement")
     city_input.click()
     sleep(random.uniform(0.1,0.5))
     _human_type2(city_input, dataRow["City"])
 
+    # 2026-10-04: required Country autocomplete now gates the State list.
+    select_onetrust_country(page)
     state_select = page.ele("tag:input@@id=stateDSARElement")
     state_select.click()
     sleep(random.uniform(0.1,0.5))
@@ -106,20 +83,55 @@ def fill_input_data(page, dataRow) :
     zip_input = page.ele("tag:input@@id=zipDSARElement")
     zip_input.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
+    _human_type2(zip_input, str(dataRow["Zipcode"]))    
 
-    return email_address
+    fName_input = page.ele("tag:input@@id=firstNameDSARElement")
+    fName_input.click()
+    print("typing the first name...")
+    sleep(random.uniform(0.1,0.5))
+    _human_type2(fName_input, fName)
 
-def acxiomcom(dataRow, website_name, in_user_email, run_mode) : 
+
+    lName_input = page.ele("tag:input@@id=lastNameDSARElement")
+    lName_input.click()
+    print("typing the last name...")
+    sleep(random.uniform(0.1,0.5))
+    _human_type2(lName_input, lName)    
+
+    
+    email_input = page.ele("tag:input@@id=emailDSARElement")
+    email_input.click()
+    print("typing the email...")
+    sleep(random.uniform(0.1,0.5))
+    _human_type2(email_input, generate_email(dataRow["Name"]))
+
+    phone_input = page.ele("tag:input@@id=phoneNumberDSARElement")
+    phone_input.click()
+    print("typing the email...")
+    sleep(random.uniform(0.1,0.5))
+    _human_type2(phone_input, (dataRow.get("Phone Number") or "").strip() or generate_phone_number())
+
+    # Date of birth was dropped from the form (2026-10-04 capture); fill it
+    # only if it comes back.
+    birth_input = page.ele("tag:input@@id=dateOfBirthDSARElement", timeout=2)
+    if birth_input and dataRow.get("Birth Year"):
+        birth_date = make_standard_num(dataRow["Birth Month"]) + "/" + make_standard_num(dataRow["Birth Day"]) + "/" + make_standard_num(dataRow["Birth Year"])
+        birth_input.click()
+        sleep(random.uniform(0.1,0.5))
+        _human_type2(birth_input, birth_date)
+
+    
+
+def affinitysolutionscom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
     try : 
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
         errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\AcxiomCom_" + fName + "-" + lName + ".png"
 
+        screenshot_save_path = screentShotDir + "\AffinitySolutionsCom_" + fName + "-" + lName + ".png"
+        
         arguments = [
             "-no-first-run",
             "--start-maximized",
@@ -161,67 +173,31 @@ def acxiomcom(dataRow, website_name, in_user_email, run_mode) :
         
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        # ac = Actions(page)
-
-        main_tab = page.latest_tab
-        main_tab.get("https://privacyportal.onetrust.com/webform/342ca6ac-4177-4827-b61e-19070296cbd3/7229a09c-578f-4ac6-a987-e0428a7b877e")
+        page.get("https://affinitysolutions-privacy.my.onetrust.com/webform/a564cfa1-53bf-4c10-bf95-cd907432d7e8/7e4e6bf3-6562-454e-8c73-6a7bd1f4b336")
 
         sleep(random.uniform(1, 2))
-        
-        email_address = fill_input_data(page, dataRow)
-        print("email_address------", email_address)
 
-        page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA")
+        fill_input_data(page, dataRow)
+
+        # 2026-10-04: the form swapped reCAPTCHA for a BotDetect image captcha
+        # (#angularBasicCaptcha_CaptchaImage -> #captchaCode).
         sleep(1)
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
-        print(rc_anchor_container)
-        rc_anchor_container.click()
-
-        sleep(2)
-        page.wait.ele_displayed("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        sleep(1)
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        audio_button = iframe_container1.ele("tag:button@@id=recaptcha-audio-button")
-
-        print(audio_button)
-        audio_button.click()
-        audio_source = iframe_container1.ele("tag:audio@@id=audio-source").attr("src")
-        print(audio_source)
-
-        response = requests.get(audio_source)
-        with open(("__downloaded_%d.mp3" % __import__("threading").get_ident()), "wb") as file:
-            file.write(response.content)
-
-        sleep(1)
-
-        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
-        solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            result = solver.audio(("__downloaded_%d.mp3" % __import__("threading").get_ident()), lang="en")
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            print("Error: ", str(e))
-        audio_reponse_input = iframe_container1.ele("tag:input@@id=audio-response")
-        _human_type2(audio_reponse_input, Code)
-
-        verify_btn = iframe_container1.ele("tag:button@@id=recaptcha-verify-button")
-        verify_btn.click()
-
-        sleep(5)
+        captcha_img = page.ele("tag:img@@id=angularBasicCaptcha_CaptchaImage", timeout=8)
+        if captcha_img:
+            code = solve_image_captcha_element(page, captcha_img, "affinitysolutionscom")
+            captcha_input = page.ele("tag:input@@id=captchaCode")
+            captcha_input.click()
+            _human_type2(captcha_input, code)
+            sleep(0.5)
 
         submit_button = page.ele("tag:button@@id=dsar-webform-submit-button")
         submit_button.click()
 
-        sleep(1)
         
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)
             print("Success Confirmation API is sent successfully!")
-            sleep(2)
+            sleep(5)
             page.get_screenshot(screenshot_save_path)
         except Exception as e:
             print("Success Confirmation API is failed: ", str(e))
@@ -230,12 +206,12 @@ def acxiomcom(dataRow, website_name, in_user_email, run_mode) :
         try :
             # response = requests.get(errorConfirmationApi, timeout=10)
             print("Error Confirmation API is sent successfully!")
-            sleep(2)
+            sleep(5)
             page.get_screenshot(screenshot_save_path)
         except Exception as e:
             print("Error Confirmation API is failed: ", str(e))
         raise
-    
+
     finally:
         if page is not None:
             try:

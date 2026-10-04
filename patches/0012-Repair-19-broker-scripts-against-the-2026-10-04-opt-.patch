@@ -1,0 +1,3019 @@
+From 65cb32eeec8a245270817bbad8ed133eb5432952 Mon Sep 17 00:00:00 2001
+From: max994-dev <bmax994@outlook.com>
+Date: Sun, 4 Oct 2026 01:40:47 +0000
+Subject: [PATCH 12/13] Repair 19 broker scripts against the 2026-10-04 opt-out
+ page captures
+
+capture_forms.py run on the VPS gave the real HTML of the 22 brokers that
+crashed most between 24 Sep and 2 Oct (1,200+ crashes, 0 successes). Each
+script now matches what the site actually serves:
+
+  accudatacom       privacy.deepsync.com rebuilt its form (new ids, radio, checkboxes)
+  archivescom       single OSM-autocomplete address box + hidden field
+  completemedical   human checkbox gone, honeypots, Remove radio, optional signature step
+  fmadatacom        reCAPTCHA -> hCaptcha
+  demystcom         captcha mounts after first Submit; the old refresh unmounted it
+  acxiomcom         form moved to omnicom-privacy.my.onetrust.com; Country gates State; phone required
+  affinitysolutions Country gates State; DOB removed; reCAPTCHA -> BotDetect image captcha
+  beenverified/bumper native selects replace the MUI modal; age field; guest account type
+  faradayio         Google Forms date = _year/_month/_day sub-fields (was HTTP 400)
+  contactoutcom     e-mail + Turnstile + verification link
+  americaphonebook  reverse-search the number, click Remove (contact form is gone)
+  brandwatchcom     DPOrganizer portal dead -> CCPA e-mail to privacy@brandwatch.com (their documented route)
+  alescodatacom     page 404 -> CCPA e-mail to privacy@alescodata.com (their documented route)
+  arrests family    *courtrecords.us fall back to courtrecords.us/optout/ (I Agree gate);
+                    ohioarrests contact form lives at /corrections
+  dead (step 4)     advancedpeoplesearchcom (parked), findpeoplesearchcom (ad page),
+                    acbjcom (OneTrust form removed; site blocks fetches)
+
+lib/broker_helpers: select_onetrust_country/autocomplete, solve_image_captcha_element,
+set_turnstile_response, wait_text. capture_forms.py gains a round2 target list for the
+pages Cloudflare hides from the web server (allpeople /removal,
+advancedbackgroundchecks /opt-out, alesco HubSpot form, brandwatch DSAR form, acbj).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ capture_forms.py                              |  18 +-
+ lib/broker_helpers.py                         | 138 +++++++++++-
+ sites/__pycache__/acbjcom.cpython-312.pyc     | Bin 10800 -> 6672 bytes
+ sites/__pycache__/accudatacom.cpython-312.pyc | Bin 10119 -> 10626 bytes
+ sites/__pycache__/acxiomcom.cpython-312.pyc   | Bin 11397 -> 12348 bytes
+ .../advancedpeoplesearchcom.cpython-312.pyc   | Bin 6141 -> 4635 bytes
+ .../affinitysolutionscom.cpython-312.pyc      | Bin 11494 -> 10289 bytes
+ .../__pycache__/alescodatacom.cpython-312.pyc | Bin 8230 -> 873 bytes
+ .../americaphonebookcom.cpython-312.pyc       | Bin 5500 -> 6467 bytes
+ sites/__pycache__/archivescom.cpython-312.pyc | Bin 11635 -> 12951 bytes
+ .../beenverifiedcom.cpython-312.pyc           | Bin 11826 -> 12011 bytes
+ .../__pycache__/brandwatchcom.cpython-312.pyc | Bin 10357 -> 853 bytes
+ sites/__pycache__/bumpercom.cpython-312.pyc   | Bin 11421 -> 12026 bytes
+ .../completemedicallistscom.cpython-312.pyc   | Bin 11397 -> 12095 bytes
+ .../__pycache__/contactoutcom.cpython-312.pyc | Bin 6974 -> 6743 bytes
+ sites/__pycache__/demystcom.cpython-312.pyc   | Bin 9719 -> 10942 bytes
+ sites/__pycache__/faradayio.cpython-312.pyc   | Bin 6636 -> 4333 bytes
+ .../findpeoplesearchcom.cpython-312.pyc       | Bin 7135 -> 4562 bytes
+ sites/__pycache__/fmadatacom.cpython-312.pyc  | Bin 10298 -> 9922 bytes
+ sites/acbjcom.py                              |   3 +
+ sites/accudatacom.py                          |  42 ++--
+ sites/acxiomcom.py                            |  15 +-
+ sites/advancedpeoplesearchcom.py              |   3 +
+ sites/affinitysolutionscom.py                 |  69 ++----
+ sites/alescodatacom.py                        | 195 +----------------
+ sites/americaphonebookcom.py                  |  46 ++--
+ sites/archivescom.py                          |  57 +++--
+ sites/beenverifiedcom.py                      |  82 ++++---
+ sites/brandwatchcom.py                        | 200 +-----------------
+ sites/bumpercom.py                            |  75 +++----
+ sites/completemedicallistscom.py              |  34 +--
+ sites/contactoutcom.py                        |  58 ++---
+ sites/demystcom.py                            |  24 ++-
+ sites/faradayio.py                            |  11 +-
+ sites/findpeoplesearchcom.py                  |   3 +
+ sites/fmadatacom.py                           |  35 ++-
+ 36 files changed, 463 insertions(+), 645 deletions(-)
+
+diff --git a/capture_forms.py b/capture_forms.py
+index 817c28b..823e040 100644
+--- a/capture_forms.py
++++ b/capture_forms.py
+@@ -49,6 +49,21 @@ TARGETS = {
+ }
+ 
+ 
++# Round 2 (2026-10-04): pages Cloudflare or JS hide from the web server.
++#     Scripts\python.exe capture_forms.py round2
++ROUND2 = {
++    "allpeoplecom-removal": "https://allpeople.com/removal",
++    "advancedbackgroundcheckscom-optout": "https://www.advancedbackgroundchecks.com/opt-out",
++    "advancedbackgroundcheckscom-dns": "https://www.advancedbackgroundchecks.com/do-not-sell",
++    "alescodatacom-privacycenter": "https://alescodata.com/privacy-center/",
++    "brandwatchcom-dsar": "https://www.brandwatch.com/legal/data-subject-access-request/",
++    "courtrecordsus-optout": "https://courtrecords.us/optout/",
++    "acbjcom-privacy": "https://www.acbj.com/privacy",
++    "bizjournalscom-privacy": "https://www.bizjournals.com/privacy",
++    "ohioarrestsorg-contact": "https://www.ohioarrests.org/contact-form",
++}
++
++
+ def log(msg):
+     line = time.strftime("%H:%M:%S ") + msg
+     print(line, flush=True)
+@@ -73,7 +88,8 @@ def main():
+     log("browser open")
+ 
+     ok = fail = 0
+-    for broker, url in TARGETS.items():
++    targets = ROUND2 if (len(sys.argv) > 1 and sys.argv[1] == "round2") else TARGETS
++    for broker, url in targets.items():
+         try:
+             page.get(url, timeout=30)
+             time.sleep(6)
+diff --git a/lib/broker_helpers.py b/lib/broker_helpers.py
+index 467daf6..d3c12a0 100644
+--- a/lib/broker_helpers.py
++++ b/lib/broker_helpers.py
+@@ -613,15 +613,22 @@ def _submit_arrests_contact_form(page, broker_name, base, dataRow):
+     and their address. Returns True when the form was filled and submitted.
+     """
+     try:
+-        page.get(base + "/contact-form")
+-        time.sleep(2.5)
+-        try:
+-            dismiss_common_consents(page, broker_name)
+-        except Exception:
+-            pass
+-        name_el = page.ele("css:input[name='your-name']", timeout=4)
+-        mail_el = page.ele("css:input[name='your-email']", timeout=2)
+-        msg_el = page.ele("css:textarea[name='your-message']", timeout=2)
++        # 2026-10-04: ohioarrests.org serves the same Contact Form 7 at
++        # /corrections ("Report an Error or Correction") and /request-portal
++        # redirects there; /contact-form on that build has no form.
++        name_el = mail_el = msg_el = None
++        for path in ("/contact-form", "/corrections"):
++            page.get(base + path)
++            time.sleep(2.5)
++            try:
++                dismiss_common_consents(page, broker_name)
++            except Exception:
++                pass
++            name_el = page.ele("css:input[name='your-name']", timeout=4)
++            mail_el = page.ele("css:input[name='your-email']", timeout=2)
++            msg_el = page.ele("css:textarea[name='your-message']", timeout=2)
++            if name_el and mail_el and msg_el:
++                break
+         if not (name_el and mail_el and msg_el):
+             log_step(broker_name, "contact form not present either", logging.WARNING)
+             return False
+@@ -733,6 +740,24 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
+                 if _has_form():
+                     found = True
+                     break
++            if not found and broker_name.endswith("courtrecordsus"):
++                # 2026-10-04 survey: the state *courtrecords.us sites have no
++                # portal of their own (arkansascourtrecords.us/request-portal
++                # and /optout/ both 404); their privacy page sends consumers
++                # to the network-wide page, behind an "I Agree" FCRA gate.
++                url = "https://courtrecords.us/optout/"
++                log_step(broker_name, "GET " + url)
++                page.get(url)
++                sleep(2.5)
++                try:
++                    agree = page.ele("xpath://button[contains(.,'I Agree')] | //a[contains(.,'I Agree')]", timeout=3)
++                    if agree:
++                        agree.click()
++                        sleep(2.5)
++                except Exception:
++                    pass
++                if _has_form():
++                    found = True
+             if not found:
+                 # 2026-09-24: the *arrests.org name covers TWO platforms. Only
+                 # some (indianaarrests.org) run the WPForms portal; the rest
+@@ -1203,3 +1228,98 @@ def ccpa_global_quota_reached():
+     if state.get("date") != today:
+         return False  # stale file: counter will reset on next increment
+     return int(state.get("counts", {}).get("_global", 0)) >= CCPA_TOTAL_PER_DAY
++
++
++# ---------------------------------------------------------------------------
++# 2026-10-04 (capture_forms survey of the 22 worst brokers)
++# ---------------------------------------------------------------------------
++
++def select_onetrust_autocomplete(container, input_id, candidates, timeout=3):
++    """Pick an option in a OneTrust <vt-autocomplete> field (country, state).
++
++    Clicks the input, types the candidate so the list is filtered, then
++    clicks the matching <vt-option>. Tries each candidate in turn and fails
++    with the list it tried. Returns True when a click landed."""
++    from time import sleep
++    inp = container.ele("tag:input@@id=" + input_id, timeout=timeout)
++    if not inp:
++        raise RuntimeError("OneTrust field %s not on this form" % input_id)
++    tried = []
++    for c in candidates:
++        if not c or c in tried:
++            continue
++        tried.append(c)
++        try:
++            inp.click()
++            inp.clear()
++            inp.input(c)
++            sleep(0.8)
++        except Exception:
++            pass
++        for sel in ("tag:vt-option@@aria-label=" + c,
++                    "tag:vt-option@@text()= " + c + " ",
++                    "tag:vt-option@@text():" + c):
++            try:
++                opt = container.ele(sel, timeout=1.5)
++            except Exception:
++                opt = None
++            if opt:
++                opt.click()
++                sleep(0.4)
++                return True
++    raise RuntimeError("no option matched for %s; tried %r" % (input_id, tried))
++
++
++def select_onetrust_country(container, country="United States"):
++    """OneTrust DSAR forms (acxiom, affinitysolutions) now put a required
++    Country autocomplete before State, and the State list stays empty until a
++    country is chosen. 81 + 90 state-selection failures in the 24 Sep-2 Oct
++    logs were this."""
++    return select_onetrust_autocomplete(
++        container, "countryDSARElement",
++        [country, "United States of America", "USA", "US"])
++
++
++def solve_image_captcha_element(page, img_ele, broker):
++    """Screenshot an <img> captcha and return the text 2captcha reads from it
++    (BotDetect on OneTrust forms, legacy image captchas elsewhere)."""
++    import os
++    import threading
++    from lib.captcha import get_solver
++    path = os.path.abspath("captcha_%s_%d.png" % (broker, threading.get_ident()))
++    img_ele.get_screenshot(path)
++    try:
++        result = get_solver().normal(path)
++    finally:
++        try:
++            os.remove(path)
++        except OSError:
++            pass
++    code = (result or {}).get("code") if isinstance(result, dict) else None
++    if not code:
++        raise RuntimeError(broker + ": image captcha could not be solved")
++    return code
++
++
++def set_turnstile_response(page, token):
++    """Write a solved Cloudflare Turnstile token into every
++    cf-turnstile-response input on the page (sites render one per widget,
++    sometimes two for the same widget)."""
++    page.run_js(
++        "var t=arguments[0];"
++        "document.querySelectorAll(\"input[name='cf-turnstile-response'],"
++        "textarea[name='cf-turnstile-response']\")"
++        ".forEach(function(e){e.value=t;});", token)
++
++
++def wait_text(page, needles, timeout=10):
++    """Return the first needle that appears in page.html within timeout."""
++    from time import sleep, time
++    end = time() + timeout
++    while time() < end:
++        html = page.html or ""
++        for n in needles:
++            if n in html:
++                return n
++        sleep(0.5)
++    return None
+diff --git a/sites/__pycache__/acbjcom.cpython-312.pyc b/sites/__pycache__/acbjcom.cpython-312.pyc
+index 3465968dcef0b028e66d79d99be2c69943bac1c5..5e32a8cef8227e6255b2964ad586b790345d6345 100644
+GIT binary patch
+delta 683
+zcmX|9OKVd>6rP($lcux^;-eJww1Fm}O`0?%J`tL>N(I|RyEaVjJxOkJU(U=;Oo+79
+zO|c6DccE@X7cQhAmiz+O{)0<biio%o>PA=2t;K<J_|EyxH|JxR51ajku}`C;2_jGJ
+z{l~30a5yF+v9nwk$ma&HBHfTu_Qqoqiy|D%1gEDQDF2YAG(&{2s21ueUD<l9^pp*f
+z39o&ZZQ?8WOvn#&!Thj+miHhwJCm0E1sOak(+)XGjP9xX>7AvcSYogE<WYZexA$V{
+zb@JtEUmYCAIzu5gHJBaiN4JCRK^$L_={XUn4hYfyyV+GTp|$Q8s#dpD+q?mbOXYhh
+z4(k?fGM5WzW3^^86AGn5saV89HkZrI(Q8+0SSrw<0EWV47KhYk17-2hMJ`YS)wZ?;
+zS^{(qmJNn&)sX>hQQe?b15=PzsUwwgbUr^{$`<n3{6Yq(r9ogOC*45Ru+=69j;tlM
+zH56(C`Ax78H4YT2%x+5#xGVV%NS`322MgQaFug^m)lT-*5E#1E%q0DDYqnT59Rp2i
+z4Yd`<Z00?Mjf5X>Ak_@y-1`jc7ZR0<ZaOv-m5M)HM^Vu=De&@>Zj=?}V|s5VpLy4(
+ze#{72I5POSOgrS)5E;4rlaMRRkz+zeRw5EdS0e0Up!t?6Ox%&ck84z*&`tD*oep({
+zU3Yc1?iJJenY#fWqmEu_VuzXDLHfS3?EOwBr-NU>7K0S*d`C|1WalOR6TfBJnrq-~
+Pw(pfQUx&Mj0w?reXgbG3
+
+delta 4306
+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
+X;V88pqE9h*(k+&Msv|hAE2#euRG&aN
+
+diff --git a/sites/__pycache__/accudatacom.cpython-312.pyc b/sites/__pycache__/accudatacom.cpython-312.pyc
+index efdc4b8c3579a9f2be720b52bb1566930f16c0a6..6da120e1180bec4c12dac9f3ce6b18d5dbcc1d07 100644
+GIT binary patch
+delta 2670
+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
+
+delta 2139
+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
+CH%op1
+
+diff --git a/sites/__pycache__/acxiomcom.cpython-312.pyc b/sites/__pycache__/acxiomcom.cpython-312.pyc
+index 02910c49e485b34f1ea8e5097b1fb1b0beefc010..92cc4fbf3604e1e399a3b64c4a88fe0100035943 100644
+GIT binary patch
+delta 3225
+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
+
+delta 2456
+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
+
+diff --git a/sites/__pycache__/advancedpeoplesearchcom.cpython-312.pyc b/sites/__pycache__/advancedpeoplesearchcom.cpython-312.pyc
+index 3400b45596cbe0289bf8cc2b7f0944e466e86fd4..849645779bbc23efadc255d190bfaba5d63af4d2 100644
+GIT binary patch
+delta 1207
+zcmah|&1(}u9NpbCAG_NmwQEh|S4V5KX`8f`qS%TksHF%!6oevPmdqsCnCvbylVakQ
+zmL5Ea2XO=ikK#d!($c>`@a8`tiwJra6e|dd;LN7M3Wf~K@Mh-me*511_V>io6N$I+
+zxF+#YeD%6=fB#luGZY2HqKHgv`=NV^{DGm!vy()pQNa=eMmFRYT9>^rRMLF267eDx
+zm2F0kusbpJIE=O_vP9!8vLw-D8&&$)R*#X2L3KlEo$cWp>~3^O*8<t77u_qX@1b>+
+z9qu68F78F?0L#ZRdT&r7=EYhi20AKU>!ui^skZvYE@&H*C7w|{sHA#ow@S0!DycB>
+zk8(0l);z77a;BTI=E<;+y;C!6NK+##x~Est;+2y9e?xCbS%c-Zk=1&c+ce>_X%`T5
+zk>geoK_)Jg3r=kYI4;dObqb0Ot^vz->y!Z75&OCg!H8>?5Ga&QyM!QcFn|^euB(m-
+zv*6R(BVZ#02`~Yv<7L!n4$_8e*(E^B2ox<$C@X7g$KrmNxK)e#Ayh?v4_}DiyI8lW
+zRYO-Wb};*;ebdhJ51rtXyktN0#leqy`hDWyS4ld2RoRiG<eb8>I;U*U_b$n+Ax;!?
+zXOJ(CCA!<^yyxY12<viIS!h1#=>2~ed7cWegdx|&x43EO)J)43`2b>85pZm9sYuZc
+zY+D5|QZQXw$DB4bIdvv?dNMaTot+KLx024aq7Hsj9vrATJV^}DZHrKn-RBz%4xO*@
+zC#fNuBG}5}OMhn6kCl-Lc}@fimwu>(C=PRkMf+l58jHMemYp-k<#ARtM#FfFpRfl;
+zK9UnxdG^K_W}l7ev3b5-;**FLT$8>>B>gB4bEqML)te&Na8tqk{FYrm@H{fZ0nR>5
+urN=G`bVw{gH6ipu3W&Im<DaqfH3!zK=mNgUE~hpUr{vL{MR`UB0p|}BArCwN
+
+delta 2519
+zcmah~TTI(l7(Py7$4*WXCloO#G@;xIG^Cf&bp=)^myLFs*jTF}QCgE@AZc#04Jn?p
+zY}2GsjjiphX-L(yYSW}n-NUNBRBHEBT2<=9lEDN*OzI?F_Qq%*s#eo>>|h!YjHCFR
+z|9t=N@4uY?I9DqF2{<1*95#T5JQ*GN+;hYEv$?df{YZZ@9z(n^G#cp__-K5Li}Z^j
+zi5L6Tv$mp}i)PV8OshTA_Yj$i@yjVnp~BY7S4$cQATb)9HV}24$VnKr=Oh3mharWX
+z>J6%($cpIerW}@M?^ZvvdhLwPZdI(Cu-o#iw`8x_g58Kgu}TH%LAuIr*FDh+t$R{`
+zwL-Wt(rvkDsZf1Lm)W7t#VE|yTus}>#UO`K6#^(Ea_XEm#kMtP)pndVg+MO#52nh+
+z8nsK=6??cyI|rBBzz8r7YCY;f+aC3S?aKnVK#GY-NLn!S5q`mfCsBRhzG6FsYZ$<f
+z_?4Q3@7(+ozDG3CcyGqf<HLCV8ZZD63ULJ>lVZ98zOke%t9$e6o>Ty`Xqklx+&vyd
+z>RD3j&>lqTs8w3+65Lr<8NZ`Y+Kgyj))B;La*7@X$o3tPVk8o8^`S6Ec6$AsDVt(O
+z_H%mx5Lm^ga<q5nS`R6<pP*r_*T<pNr`%y+xSL%DujDqQut&2>JCVycw><ko!%DF$
+zz|a%8K2njPL2GA{&yU&G?hrmHtq>cALcg#`+f89FE@YYjX}T9w0I9^Vt^|TN1@qjw
+zr7}aOtfl)Rv_6193Vr}58*^)tNP_d`K9D3funwf)x->jEoV3ooRUYY0^GN6A5v$+e
+zWPRub+l8La#T=tI#=e%-w;MIJJKmC;M<gjB9ti{zLTHQ&jwgh;*bt0I14(``fH-kv
+zFwO}mz$FrV3~`B2Lt-Rx6zjB4V~bo|ElQj;Dz@yePGe<@B#iRae3T1C@^lBPH>d>d
+z6a=lag<W`(i~HNq7#9ojsE3ayB785;3Bi%}c=XHy;g>B9iP&&0DLeeJxPK@lh>~9z
+zjmd7mANv+0f0R2PiiYGgkK_VB3W?lcg!hNJF-{B$p@byEHE=jFDzj@lk&lUSL0q6m
+zcn;wUF4htYkV8l~6UV=VB+7@3+9Z?725v~=g;*%47bn6GbCCcyEbx4kk4a(x#nU)E
+z$uEv@0xy)~tp3vOq1@0r8Vq7?Uwb@;V~=uDC?4~*^>q6}q7O$P`NW(7{@aO+m&=v^
+zXFr7N%A+Gbd2gp6#D(>oN4F;3y@~m%wLw|SsvcJrDZGk<R@+=9l=h_)_Nbg|FHx_4
+z;i^-AaWznTHPEmA?W!;db*h_vC4C$tC-EcR#aH%2uxzR)TZ#GI1DP}DG6Rui0HQ>f
+z2`{gk-qn^a(@AY9KV{0$W%K2yGXvqw>2nx~5S=-FueNmNtbHf3S?MFTXo|Y*nq#Z7
+zY}E`~bB)Ndbra;g2B-6JQ<kltAQ!#<%)S#@?}-O|*4vvo)tB}5W%{|Sm&>4V)*Hr*
+zD;BEIHo-h$K|#&c@fpwlIZsp8(=_90nXt~=3ogmO*~{l)!5l2j!qQo|Yst0qTG6a)
+z|Ab|ph8O7zbjIC1OCMjN9qGxTi?Iu_skg5ZGtS+!bj1=~G-a6@o~5goDT+BpEJ1h1
+zb8Hs2FGBaF^2s;mAv*`XS?JC9UY>=G%O!whKJEUf`;!xo?B0yU`}9c}V2f7(f#1ci
+zWITuORNUfjSI@z=ENpweY}ORdpHKi6t^g~UZY7pY6w{jX(>e>=Hu3X2Y<#-tdPyT~
+z&5<6uW4_gPo0@}1v+$@++DiQUeA!{ehxbf8i_i1pc6-MGaMxMWVFlAxrXygUW(zy&
+z%+pmQ#;5B@4GEZE)iwv1u440ab4_QZ>0SlVwZnX`lIeovJ%3@BmAr2vF>>EZV&pzF
+zYw`{f+p8k`1J#T@;U?SVF0OCW#GTrtcb?W)KLWv{0W6-L(aq5~8jbL;38&RT_jP9_
+OQTO;wVjtntZT<r&98y>S
+
+diff --git a/sites/__pycache__/affinitysolutionscom.cpython-312.pyc b/sites/__pycache__/affinitysolutionscom.cpython-312.pyc
+index 149e035ea031c37609287b63e802fb4625b66ed1..42b75b6f5cfd71e21b7ac62fcd97b0c2b6088346 100644
+GIT binary patch
+delta 3323
+zcmaJEZBQG>bys(XbkgYqeG3UBkoXW^20QN5*s;Ojv4O#<O)@pOwJf+Z2qS^-PQjRy
+zA&!5Lsar#~8RPLZCh1Ja8Qe)c{OO-g+Wtrl{!tNVjWtY@{%AX%wi8nG!((@v?w%0F
+zwA0n>+qdt%ef##^d%I76>ALqF(*vVX4{-bX=f56UESfgC;mmaTsFer2cF-EPb=%_h
+zZhPF(?U;Vw18dL;Z9!hQQ*aLKLQS0AG6%_80J_~8AZQ166aIL20Y<--Wo(B7`?k-r
+zxKO~ef_sk2&bkX#H3$BOTp_Q&YnanyIS}xi;OC8k<{ZtNuF~BB-YgXJMxMfRuLToI
+z`24G&JIGrx4DmJ$OGl}&9eo1D*TPiBAqj&*uN)al2(p-z<cK6kWg+9*N$wp=CS-9m
+z<CTU6-xMOTc(hN5^hSr}-u`F=tB4B;dA>yRQwYuIGs>?mlwz_V?Lv^QWt`Yn>-;P9
+zLs;R)Xa@F5<d}g#Ky;8f7wJ#Nqlt(-IxOrK1DI5T_T=q{E;N+qfrrsMdERk((=h-j
+zFz0I?p2uzw8D68nOL$cZDzFoTspF4{cQUXptjSQ4EM}-dAwlp&GM=GCL6!(Vw|jm(
+zdR`#MPViBYk6;<G0<&vzmx35ffHl2w|77nEDkhrOwED?CZ(p1$zM{-D&jxR{PW66i
+zFio_HE-cu)`AskifEIUR@{@pWzFFI^;ba>jlcoUlCv7qM4I8t_<os$=@VR&s`bJlZ
+z9r#0i(nvIBIgq!YdSeaDN3R;H44xdFx1wUM6Mbd~K^ywpOB_4qj6esv$yGrQ+U0hj
+zYVH`t$zD`y+=ty7F>a$XMg<NOqI#VToiVcdi%`<wsPYW>NeDaeR1bk%oZEGdAn&pv
+zR{`(6>&t~<%A}aYi7h>i1?({~ArtSZ4IizD*uC}P{N!`J#1Cxe6E43ggPKf*lvy#M
+zdbZDDQp~w6AsAJE;bQdMbeSo@Oa6*3o8OrK%A5~18Gy?3%e-O<CVvDoS~(UMhLZ9n
+z{o$A>_XoO!DEh|Y(}b<)wfx!xJ}e~`5)dH3KmfT5#1IA<W>}2j*v}(4)hEaq2FFxv
+zSR|iVtU&MQ|LnM-hp3Ij62nP3qt8xwoJW!c%iuVFsbz!Sd@eRPm|YRUqEYcU7JUVG
+zsSCYp{g+`Q4=}!&mKC~q6<xR0nAd2}OlVenN4pfLTcPXczp!<{@sZnOH^=TAT=qA7
+z?r;1>&%>glOGQVQi&{S~;#WF)mOJ<rT3FWso9jl!bVb_RbiaP8V%gd;(f&wlof^3@
+zHa#|bV8vCp<|vyTxszHde|6b$@K?4aN6X65Q|Yd=>FD56SA6+sV#$$6Uyzp^@&*7G
+zVXI~xfHutu%{U%UYR+iBCew)K31OZkGv`^&q<&Rrd#Lj)={zes@0!kd?cDXmJBgXj
+zS=+LybVXOTrn66-o~``7u4bJD?)r(bY!cDf1-Yifh?+!yU;wxQc#xu5z~d~x1#r%5
+zZrQ+3=oGU_pfCZ?(Jp7XmLbuU(xQ52)qb74m6yDhM3$mLUZ>(J<XM8J*gnAPKZGeg
+z9u0Ujpat4bF+7L<><mLAGP|mf$;Ckv`pW4?4KD5tvtm#<buWu-#46OLn0c$J+d^P2
+z=5Z34HwA!VRB$9KmbuNtrt;<dEuJ3Tay6T+3dP&c<BLeNDAoZNT4D>4-mTBK-gV?O
+zrf7v8@T!UXZTIU8t$;ZVn)di9dLW4Ix$Sj)!Ch}IT~ap1CLWPXx3-}b8}G|KHz_+-
+z6;xH>+(p0hxY4-LU=D9dI~2RB+-5GyZ4W_ijnSW@rJRZr-SgP-YCZbcXM_QC-QzG9
+z=lJTHD)a$ubFkZKZ`oL)tsdp;3hUWUpx_<^a&>P15D@(-*9#Z(CGxHuPjR7N7P|Jj
+zF1xNZ;0VFv2pj<ysV*=Acj)L!xmd7GOOROCwZpoc-WTKeHe0X!f4f3E?K*+&xk4iM
+zCA)Ucci2fo(53p|#W@uEt>P^o`6@?tnn95zBlwp+cy0`rqECz7G*sflh$IcfD%9xr
+z!e{7v{!eLfHvq^N_(wDGvwBrts+OaD4Y7D%V`GeeHJa#44o1bpQ7P8jy!q5`j;-YV
+ze@yaI+=D^Jjvsn^;U$l{oZNz{g3bD%d59Op8uX)*Gt6V0$N>GlWYp~uNnw;RNxh<g
+zYlqJMA-N?ciawMIdJOxCVwM0W`XE?zI!aJ-6NscD5{Z)ReN8S+aUTI30SyEMFvytj
+zMIFiNmays!d*ouTFf7N064^_gzL1Q`VYhe)od{Jj;z7IyjfHCS8Zja^p^rla_#Ivh
+zoouiXZH8Q>gI$xMd+~WP#x0V1=^LeFPdp|^dXlm{l*m9qa-%<%dP~*IUgU{Z0#dk3
+z)%YY6VAWurXj#{MA2N>ly=7DI^o9<wrpf3v-Kw+TM*nnw+TW4>?y0H%WoOr<;gP|)
+zW~;p;e{wo~_|&qkYqDk47r1@w=CO2X<Fc=5vSXF=JmmaKoPUKYUgO*|g?H!`u4awP
+zp9)@UL;c~VvLe7)(gyFkhB7)<E%qDiH2Y%%ejT_#n)as+ehi;(gwf-0C8c9b$W>Wl
+zTH*Gt=V7a!ZZN>&L5-D;@icd6RcCy@&Oo*i{(IesMW1i@fW7da0IGVwR5h(@@$C7!
+z_P_Uh&+v53=2N8~S?uc+mU~9ze9xp0v3IT>4YZoTZ%fOM1;Kr@rEL$mA7on%)ctBl
+zYaX>Q4jIf|$YU^R!9Wq*#J1H@3-0nZpjkKs+p4HVz_wK|i>#w9$Sf8ygc4*3rGg@O
+z6@%p$>!@}LEbd|30kwDtV)%ff+AF9BT1&f|e&B)xceCvw?So<s!Gn<Cp*$K-!ez)>
+zRav2y4gJ{WjE+3^q{hgw!=urpJk*zrWptu&At^|*gd$Zfe(PYYr?y8NIxmQkeqnG}
+z5T$I5p;j9lx?Ods^PH-S)T4Y%lrr>S3|AVYdRAjr4Q#bGRci$`o<0KVtEooWGu?ss
+t5T6_r4vO#LHRKP8G>_`5gLz+ofh912Ua!7lIRatrlarb#gaLKse*k%%9Ap3h
+
+delta 4428
+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
+
+diff --git a/sites/__pycache__/alescodatacom.cpython-312.pyc b/sites/__pycache__/alescodatacom.cpython-312.pyc
+index aceb09e96d3959fc1442ead23621385aa9166eba..dd16b0bcd1b42bfb23aab4807470597e66dee380 100644
+GIT binary patch
+literal 873
+zcmZuvziSjh6rR1i#3S565KLp?GmV~PZ_i{=I7IBUvM}1DIc8^HywTm6WoFj6lET9O
+zA+2pt#DBrse;_Pa34&eVQl;|EBvArBxHmiZzW2@detaJeR~Xsumv66rbr}2UFBeAl
+zV2d?64p`3es9<HZ6GbfVd|*4BraS8W_K?G<y=H1P6QbfXEV(RZx^lX9q8Av>+%g?q
+z`YnLm0do-@!SZOI827uMyPwYS+icY1hXmN1Y~G9SPU1;Ag(TOp(k`}G6mi+a6&kA*
+zFJh^7wJEuiS|uPYa7ZWV7@p5@1;`9m1s7PNavQ)4v_j|H@v+clQW^P%izXHnM3Za)
+zmKo-r;z^xtSK5K61~=y}aA{REM5uCl8>Av!X7rv#L(D1%=`1*W>%cnh&`x2!(KQH8
+zz`|;vrT}#X^ll(?a|B-u-GOihE-E7CzZF5&kSJ=YR4<_>Wo{ah&y_#AT+sR$URVrz
+zA=jezMPm+zUPY*tlLf`_qPRd53Y>Eb8KNSsm8%V<_;Rc;vhw-2C&~RSpb=ZJwGfCo
+z{h1-9;%FRL+TlMT)Yx}x|JOI_w8Qhr*`l<4zc{6)hWgzY_1Y_bIM4K6JJ`d_N{2JW
+zOKgWy&1!1&S(@n+*!pep6Fyz@IGbFOFs>ToS1ve@wAabKXD6#{aP#AhueXkp$47TI
+zPnJ4^^q6&)(glUt(^0p*TF7inbA3&(&9U%PF`ghW9WpcY-ve@|{RgDHF7TmQrK?|P
+T>x0MLD2jftbg{e=r2+m24X**9
+
+literal 8230
+zcmcgRTW}LsmfccIYDulPgpDz{ZG%ApnKuLjgN-p@NDPI^CQ*?nZFSpjA*q$_7PeLG
+zjb<jhV=7buUv@S-HLjWYV2b%j?bmG0e9XrTN!9*HE2Zq}Ar)6GRa<;)l^6J!N<OmZ
+z-d0P(F_@3pxh3_z_uO;OJ?GqWPoI1GKRg~60fqd&C8f6z#DAfVS!}h&(*=?s<_VtQ
+z$uyB6<7CDXw~(lBNn0~ioWgBu+7`C~%$l~x?YMTt9k{0BG_IX-C$3#_7p~oLH`G*`
+z$#~)(Ov9G;W_)p9#vk|NzC9ht1mi*6cBDg@a6C*B0-f@kEH>)Y?nc{e-LEy`5h0R_
+znb1bf)AvC#RN^fbLU5$^8NKFboyKMuKh!*8v{Ofa2opB*PNC(#)fkDlW7>V|;I;Fv
+z-@5Nxj1iEM5w`Ij!7@(q-jAtx2k#SD-osm=?}vUTANZJvckw}ZcJm>4ZlAG6!;jJQ
+zs6}T6CuJ!k<};VM2|@Rny-PV&l(I^c)NM*y5OO2Xa$TL02DzM?oaA7lcS6VtGN%d&
+zA;XDjJyP%ICZ(*9$mTO+f(+9lykwvxZV0kCE+#od8U`FWS(+9Fr9kg^H?|`a+rjIu
+z(WER0+0jW!y$Tq#FfA%-Lb|RyIe8+V5wfbH+hsw`%h_aY6R;X6cp}9;y#SASLamRP
+z8!=02#2Mnf5JAjZG%{6FGM-y|Xclu@N#a(7A~bT8h?0f>aj{SarR=ykk(UL9<+40$
+zaG<cJwphtfS1(4!kG>oya~XC_mZlUzPUJXsvX8wCPga#!by8@|t)Z~Ow2;iJ+*n#L
+z$kZs*1@B|u0A;Y!I9ms?<C45Cu^I(~&%Orxe0|y42D4&TQMqigwr12KBUS2*BB%*-
+znW$CvAfTfrrB0h83eqE}=iA+beb=U>EHB98`Sdke$VfN1^fg6P1?3u-7L=sKb1IjV
+zGQGJOJv;%#lQpwT)QHMqAQgnaf{s&>c;+X3+bZ6U;<;6th-`a8khYz3^fK*RqT9=K
+z`@%b4(LJkH0Is-$#gV5lhtMfim{yaugMlD~1OC`9WN6I8o`MY=z&1dn>NbK9jnZrb
+zYTZUu)1?t9yNTJTd6Ku7hq1|m4p9UgGpg_aTf^0v9GH%nWjS_=n*saDh*?odf<5E?
+zWGC|(F1v@F62U$=Rt6iBGAu8o0T(8X3F;J_3ij~6jDpN(|31_}doRF|nqlEU%3M+v
+z<Yvng(gHd!ee7^Hmsi<Z7h4}N!y;8dr+Eefndq>}7$5;Ak5MN6<x^CCbLzj1#=oB$
+ziBh^vM6_k3A2^nnYu%C0iojYXYSkUJMdeKhflQj_BEvBR8%toR6KIhG@-_f<!C!&x
+zf$d-Q65ikw!fK1ok+A8vJvTjfxGLTHi1yqXzn#6AUAVe<u;ShM6}{_!9e^cAVA^vo
+z0c{`pKRpePW|yE5_iI}}OExxHBTXnzUI!DBZ9F)N0?Y;1fn0%g<T0`=o!ke`&#I`h
+zZcPhW)CNzdTj8iFXq;sY=>i$<x{yF;i|1q>c|*AehI`?!bi<=aJal>HlAr7<4nB0a
+z<_`XJ`cCIhw1vUN?oWsBBv;(t;srw{MAR(E{IE<GXd!dv$;|*-&y-Ea$6F8va(b_T
+zYsI)$jabh?@|3BeSxTc)^+RDYM-b+kBmv{-=&dP@an)%K@ivnxNvLiUsv?JjOUi4u
+z8Z~d{9X~vBYQV(MC^*P9y#X)lOH+S~&)PKG2GZDGSsLg6gEThH+K@&?X9pK^N6i&y
+z?JtnjRmX5>jtwMryt1Tjlj`4a-yE8~A?XXGVa#=BX^q}M8hQh1{#N!z!(MpM+1ZeL
+zZ=HLm=G=gL=iiBYC-2*kZ-1R{m*z?#XS=5GfjWl!1sK6P2BX5Q!6;hYj+$WgJ;wgm
+z1N2_*ZCrmRO}SLG$+&19Q<{eE8vct9nWHcCKVcJN)~k76mH%eCGek5pqEjPWMv#%S
+zd;C3=!Y-AY=)<q&{(g}^36WNAERmG55PhkMaZy&(SQcg^_7z&;#VckfaQuh|STxYv
+z+bg#MwFyJal~aYCFQb^|8U$OK2qL&iuh9K63i$Q_?1Y+TV;FGq@|ngxV_$)}j4mAP
+z2)=L>qG&M`%5bv4t)l}7Lh(HUmfSTA(HMka5bWTPRbVqH-Wr$Kakvw)Gg4k=Q4HH#
+z*wZ9I5@b_OVimK`t2b#}jtYJh?8dN86TCPfs)YcCC<1H*Z-5@77{p+9EU&6kw!a^#
+zA8puJUQ9zIolx>)84-2SaMS}gv0PeIbt^<wx-FR&I2l!9^15!z$zs-s!{j!gD{ny$
+z6jI6PHLO#disBW7(*^ygPp5L|y5~S_U6H1A+c+{K-Im6c8}|}eMBR;HwT{!+EfoE@
+zjb;tW*bAfMuc<g;?t<>AX~v{ts0PJNu9{A845eT|O=>l(_<&cqT{IUXxblsQ>9j#C
+zfkco8025ual{lP)BC*1R?wq}OX^H79Go2NtdvT!5^c07d*Md)%nVrR<mEflNU3Yht
+zwhUE*XNwn?Dc=$mDN~Uu)zaL4NI6Tc?Nw?AG;a0W?!DQ&5Ly_mxH_v;*F(yGXUl?6
+zrMB0Jov8$eHXzmw_%9{)$iHo2YVpRWA65K&i^Iz%pZ%5Kzy_o{sucS|(qfg`Rp)a<
+zV(ZH~v6wAyJ6xrXth8*IpT0X?VlP%&-Y8MwWh%TxwUw#1D%IZHUZ0y%ptIEdW|bOQ
+z3AfIlzk9y4^<pLbM)A#M|JEgcSJ~fH>ONfY9|7S5+m-^|<v@37`_W3^_2LB-K8v69
+z{_DYo!e^(-uGfl#%T!>AYAI7KRcdo{d;OK~Z2h%$aqw4km5KtwT<6E<R|1jw*1N5x
+zwxLSkZ1KV}<z1q}Whz{yHa$WZ|8(An$SE*1v(V7M5qT>>=LsidyEO7M$Z=_w&xoH>
+zvsA5bt@Ujh<gU<5<fSpY4aeaS&%FY!9pgIGTD(gTyaT;8H9LCpG;U)E??mlcdV=6x
+zza(d!P`jaaZE(G{@r?O~n{_wh_7u(l0>P#NStoBDm)QW<*M#fY0M`%EMNK|<Te>ti
+zmf6?1C1_qgh$Z!*r}<`u$P~E{Tr@`WXkN{CzqWg`{-*mvJ!((Yqib_s<5sh7)Kh=Y
+z&jvIrAHKc|T&`aWr0Vg_59t6`h<#kNz;7cax3fVlm_m+wP2o407%+3IIj9BU9$V81
+z33k`e1>e$y-(lkOtqmxw(`mvRwN}3ok;F&A)Xv6;*=pS1KB7m7ZbI!cN467k$84yH
+zht28^b4;u2sKM{MkO!U({bT6XVWXZRr-*6myTlZ^hU)vXq32|4Ye=E4D;sdWj%*(_
+z$(G%{W{u}L-|}jlXCXU{BxrD6m+2R4N22W`g%gvinp67r?uA$N4K6tYxlg4RUX**M
+zgt5Imr%aAXkSEy7<#GaK402*`ZZdZY#!&omvaq=aG6`y4Ik~?F#!jkoUg*K^-=?7h
+zYlmboMgoV1auiwx-?f2yDsE89By=)Xpn7xJiKwmMiDe}tVu{K5Y#|Vf!Gf|H%W%_T
+zMl1+?Ar#|91!X5=DeeZRBxNzD7MMD4B9|}t>pextDw3>3UAhgDRr~fE)d8bAXjF%c
+z>abBAF{-0R^}10V!`1$Mk5Rfn_l>?eaOLXdE0^ARH}Tf!&=sA~LrtK|1EZsFU%GPU
+zIpEO9nah`kN3IrvqLS-XG9VMmI?o{0e@pi1P6!l%S4c?f^rXP?pdgg=W;mXg6B7J#
+zs!}*^?p-65iMNiIKx=AD5z^^cW+s*sWJSty=@<$j<qS@9?=AF>=95XFY9wK6V0Pg0
+zFe@r7=t*T20|7Fp>6y;Q$gdW*ziiStq}v6)k1gyOl4VE&;^g#(gbQ6S#x^NN!}4yV
+zX)kOqBpg+ghd(3AIHuGcD8UCIq;8QQ2@g43A$vpK3+OUp8Ru^yO`lh#L{5@b-2*C2
+z)U_+Wg>cZDQn$iX9IzRAL->xMCXDqISWb5iO(zAMPRFsTPJNgcRbcEOn#<HqL;}Ui
+zx<||=@+iBGkAhBv<t8!`FX$0aDX6?zF#|bK4+}_NYoIcU8|A}@dbq(xLg8)*IBRd@
+zzG);AWW;6NW8^t&-#2s`F@U+Db8s)1l4Kq}TV(m1gj7XgRrs*UH7NsSs$`Vt)JZ`>
+ziSOnR*K8Z1uBTyhV6t)!kW=tij)L!pG^u5XwDptAUGJ9?*GuoGR|)vkcGd#bIm=a4
+zowdA$s?L9~l<2L?o$r<2PnF)g4v;iCWQ>oZYRJH5-vYGu6@SZu{jP7xzoYEmQStA*
+zN0$As&DoaMf-PnL?m64Tj#z2mK)GY!k3;2-;V%cv9hXX1-Y$2%U5bBD?)U)cJ)!Io
+z*PQc--yL?%(a+k5%^kn+e(GKP@Lp%7b<dpV8BK&Y%^$mathBZFb4w+3aE^W$iWq<c
+zpP#OTjy3~Iht5|*!|*A<*RtR#`+DZ6XLiErots<;K~`8Td%LUj_J?hqi@WZf|9tX~
+zRHbcb&i5$Tvp7=;?q3QXF9(lTf+v@P7t6tmUtX*P-<fl)xI=de|LN|8`@s^^US`^>
+z%r+qEZ@<@4_3fXdmTBfTeUmN)Mym9sM|8^qwJ=eI&kvN{d76C01WLivRc7!Z6S&iL
+zYj~OQFEJfurlZ6jsxpUH+X<WVXTv`p{`lgGyQ4&P{PkG};ol73Ghi-EDFt8uL-+5v
+z-}fvra7h{X4!&u?z;~b%Ch~-Ez~-)6?9P5;nf@v>u+B1HF^B*9(ASD+_8T;h{K5LW
+zf#2Jgm{Vou6sFlve*fL72hsah`2Y;)CufeI?IQm4qn$%Xi9a88p6#$cAR=emtPdhK
+zfIn!nAxMW6wY!|>oz@3?cAg7cz6g=$DeD(u=eZNMFSbU`9kqRNz=j}4Z3uG03hgf`
+z8{kKG=*$^eRFG>$pBC}iH$E;=st73y{Lz3)fyXqitZ`sUr{Ojypkdvan?b&0A}>O+
+zeMW)9Eqs_46!`w<Qm3TaeNsjVaov>`$B;kH04a3cl~GWxZ$ePxj@ta)QO2*5NHQ(u
+zc|}UYP;bLYAx8%Je7F$PaK#<Rj4;W(EQ2pZ7fk{Cz2p=e@i9&j;3hAlo3uKqQz<y_
+z@;higjWYi*qUcl_KG<Q$h+Ua+AxB>U4EL9V)^7-Wr@&|ZTlxfeuY6kgk^Ijvgc1bG
+zzrh1cf+W8oj(kmQ`U~Oy3*q^Oh%FJZ3K9F7==_E_@ip=K*F<#1?p?CCl<h4`_AO=m
+zmWq9A(Yovl-qvnv3l}QBokeEZ9iBUI``FE6pByjJD}m5_%iWgw_Pgy1llPd<)0Mzr
+z(Ys8zi<Y0cf9#$cS-koc@!BfoB}0p6Rtc!?C7z;cm35KP#n37N)xGdjR6S{>NZ%9Y
+P5b1fECNGdAi)H#hxIT>D
+
+diff --git a/sites/__pycache__/americaphonebookcom.cpython-312.pyc b/sites/__pycache__/americaphonebookcom.cpython-312.pyc
+index c508924c309d800fc6d98131e1986169ba3f8263..44e89c39ef8e3b02ede8a82ba4f8410558ea5728 100644
+GIT binary patch
+delta 3000
+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
+C@VpiP
+
+delta 1922
+zcmah~O>7%Q6rT0&dUx&hPhvZET8B9Qu}d6CNP*Il(57hvB7sywN{MJ4?<QTxS)28m
+zK(xjws#GFHYNI(MkU~>VR7FUrH#jy8hk}R|SB;h)a^O-<mFS^rk;=^4vE5LqPuk}<
+z-+nXSo1OQ@H@f}}*>Blw7J#h#=U*hr`IG%y(*N?217kA@SrC<pbbL$^rxTw<;$taE
+z6;or^uahT9o5=*g63_^Ns09EHQyv(0aCQ?KfQ)Gu+&~&IsghU*n?PM73K0P`5ToH0
+z&b4@pGiNA`iZO7Jt@D()Dpz0v5VK(3t7d_@hSaf@S5a*R1OSaf@+?-|VU;x;+|G;)
+zt<ld@8hoA-tvX7ogkUi=i~D+pwzZ^f*35>s-}@N|@<Tc`6qyzkyr+9lkliET-<D98
+zfA35}76U`+>2Xn+b*Yib1CpFft9^Ykq92--k~(uzN=6fcI2)*Vi;gNS9vTrpPKzlu
+zFj6?YAgj}<WL#1e8p-IS7#DRq8keF|iWdQj54*kC)gu>VbSj&SOo}=qMAXPgVn(MY
+zaFRM5H-4;1oZBfQADu&~6hm7oJw7d|r^eH&nvhcrS}Ra6#ff6wF(Jj{1@0-lveJ#v
+zm(Y{?1Gzb{#k(#J%n#q;8*=;jhE2X{^{pJ=I(M`JFTjU$eB0d7yA=0j!@1+z@RqGx
+zm|T@}FZAT8{o79W61&K5)P^^mopXa*l<oZR+2K6pLG*>z3*q_jvTOOorllcIHQuG1
+z7i%vaS!KTGa)GW*e|MgGW!vprI=*;(qpo+;-8c8{7FBhJ^5!V-ZK@Vtw(sqH4b|on
+z;DA7A#0n5hnrQ`mLuIJqm@JNI4b?fSiBfmaMjM!)h8?|(TC8T&7tAdB44N5xfi+?S
+z5jY%Y*hwH*z9TZ6iVx8+jf0w_#bMD%!8+BBj?bxCVjS)u_`AbWW%+?GRh?C{#%#EQ
+zAm`*^m~GG61;<XE?yv};dP-|swTd3%fQl={Fu_^DFZF;>RYs8(-t8{a*fJw)HO1;t
+zqW<PAdjd28b<YmD85LoMuTZO2>)_YUmTZpzGW_TK3^4;fB}c&wv1`^x8UCp(U1ha$
+zr&eZ}eP))~iY(=QWsMpD{+F8DNUb?6v%7N}1qEc`^6oc559F)U4y6Tc*ywtt6-98d
+z+Dqv0YPCkR!QU)?Z!{sRk*FF@o=GZgm|BP2Y#4s%^1~HZwdo!WKX7SgrxL`obyq`h
+zKW5>JQzs|ILZ?@BH*PhZPAZbDLXSI0biiJB2+HmbixS2YJCTD|-GR527cr9%Q}|9T
+zwr^z<yYOu#MI*)?FrG+EMHAD?F~mKLp46}C2Al);O<}r^fF{qMEn6&qft_bJst)AY
+zH~wO63lkUQd3pK$RbtcLm}i?Fm;vX5+nx@WAJE+S!Lx(s-r2U+Z&39QAJoI{nh?d{
+zrB2s0GPn7jhj$%5c(KNl&GEgD?~?@AM?86a--aoVQm0V@UmUUacYz!BwtfbzF<gHq
+zx#slrhsd=S8sTdp8Y7(~j=Q*lT5|1R+tFsz%_d^NP2Ozg26*~rhi8DH*G)7+))^Wh
+z>pY2LH;wqgI-T!VB>1CunRp!@^R<WYhc)(p6)4p>##h}V_TY3vNXNxDl~FXre+#KA
+T@GIXXo0Hh{PjfdBFu4B#<tVQO
+
+diff --git a/sites/__pycache__/archivescom.cpython-312.pyc b/sites/__pycache__/archivescom.cpython-312.pyc
+index 874ed096e4eda8c4ee4ea73f32ae0716ebe192c3..6cc282515b8683a9ef455e4a52edd7b3c05cdd4c 100644
+GIT binary patch
+delta 3296
+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
+P#@_kUhC>*KboKuNE_!mr
+
+delta 1829
+zcmY*ZZERCj7`~_X-nO@Q{n&cDcI*1J587@Sj(r3ekc|vnH_%Na8py(|yO+^2+H!lx
+z*t}(%QHDl^a!iIn13`bN5QCW}ME~F~H~h2Ol93yNQ-6p*jEfjUz^`*|yKbE1yytzN
+z_jy0=x#yf&;lV-EcSfUuKx6Y)Uq?Rkd~W()R~77P9~g_rctJcoIx-*%$Kof#BLm5Z
+zBqRsse$lm&K!GmyCaXhXB$^LS>*wyXHvkN9cBA1c!08AgrIocXVIF3*GT_+?gg`gv
+zGnN$nI$5Xsb;xgA^*>`O`t`CtYEe@?A)?kNOx2LMRSe}a<6L-N1<=cRjFw_XMrLqD
+zCnMR{@k{gEJfikkR*W#n1{|@|AYqa^PzCGyh^v}B4hYFvpb&@y)^k$qd5axhs%GF{
+zmJyB2s#R>oDn{9es(9c`$sy7xYp@soW@4z6Nj9mDHsc}EB$L<y>~L>c13YUEk>-3N
+z;DC<`h$WBIRTNW~%B4})YFle7Uzy(=;DnuAJvB}Qt6<D_4w=(7u52gIi$XG~=nBe&
+z1H(;S5ouhZu$*v8;o<hAFd_^|ot+VWM_)pUk4pQ5;Yd8D(9cU@NtkfsAZvd-DTPP6
+z;=G{f4n`6~NP#~(s&ys(N8&NT3;%Zf1kCV<il??|^Z6A0%j1LSz>Nw@*=RDX=Gqk*
+zl2GQbIIfUMNfam1mxx*{jw2DY!UL6CT8!a*+k=r<VpLKLL#WY$UV?g%guy}qW+IZv
+zJK*igcPV_HVBA@6xPp{cG?V+`ht4mJ%ba62lnyPr+Oym?SncxH>ON*N-sT+DvRrDL
+zb)+4Om95#*wyEAblxd0LG8C7i%3+hs{#@mS7cal?-e8VuT(;V0x1_f$R&C8%+o$&4
+zp)5<3Jww@-C~t=H=6o&JyKi)7T6bl9yK~gj%NA}{pVlu{Y|UEQr+V&C#+kn9z8q!4
+zSzQ(HcU{i6kgaOTQLW2m<+FiwV9~ifTebt%xi?sH?oHSIH#TOPd$R7{9JOc8;64dx
+z@fiNX>z?w!KAIqA35MW-3@#G9M%G*;KA=)m!6pkf4c*>4n#Ly>u6X>rwOC8(q{2xj
+z2wpdV5Lt^QuUB;y;Tf!_^uq*ixB^m)gzDu7x_M{3b!LN1^6b$7`f(Q75M|&^Usa{V
+z7D<L{YtI9V&hj7LR{#rRzHLZ;>T5yro^KD5_0?G3^99kJs#a~Rl|xX|T*}JC+Le^q
+zXdUb~yI{DcpJbzcnATd&`qkS3h)Fiuh?~$%>fygN-JlIx>O9~OJY3sUi+ujo&eqn+
+zb<weg^R+IxRO_#f>3Je$K4l&QW5h}F05Jv*5P9USOZj!~blqK``IUye{}h;kKl^J<
+zAEB%wen1s+SdgGC;O~0_Tl%BI_#hu2iz!;HjV8o5F%ut8@eC%I5PdK?Bnm<-c_c0=
+z%<hvzLIU3q@g3}^j*mv9phY|fUk}v7F9I92X&ieV-VfAh#IsNze75`>gq%V%c>(>^
+zDPl#_4d_lVmk9m?td#`K%=Aq6ytZeV^(<1Jhkv>tY^bMnhyialRO@b+v^~6QcEFVe
+z+hnGs<M9d!m`?ED;}s*OJW9TV62IE*2z3zOI{hJznCF<#c5>cj3vDLnn`wm4Z>BM_
+zoy2+v)4PFOVEjFsGz(3j*GDdFVtOm+g?3vnN8d8j2)V`42)R{3V%<k0e$cIy>=Gl;
+z)R^v2sAxPA6R)ANivC#msK7_Wr1&;AsgVeJF-DN8?u~c?YwG)<?kC=cPvGy3<sdt!
+V-8fBILIBtv?APoCz^mSy{{iM*)vEvi
+
+diff --git a/sites/__pycache__/beenverifiedcom.cpython-312.pyc b/sites/__pycache__/beenverifiedcom.cpython-312.pyc
+index 19d912b34c4216b2322c1780203850f37e61b0d4..d97ee444c1ac8d12738376fe22ee38abc72df00a 100644
+GIT binary patch
+delta 4073
+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%0A9~XaL%^{
+zC&2~ZuXf6Hutf3UUA%h`U#`)Qj8s@3sk90?1Fu*h6{sUfcxbBrU>mEjsc6MR*LW}Q
+zTlVX@;JNF7M+x)<t-&AxcWdzHz=0V%AJjc`c+d-G*0WSvzLu}6<ePRXPN`mT-sx;k
+zK@x6%ASupN{B|o?vRfW!Fu6t_;6oJ{vZHJ*A2UU8TXcJ+RhUYgLO#baXcBGcUPUp7
+zF@*u{+IBn&4%W615xE5@wQ>A7?A1MTY})>X`q4_BuTp<zQ~l>LaJ)81#ENxd&gaqh
+zY5%5u0-wN66UVR#92E|dICcyIJB;bpD1`i6xC}hdJb^_qIiSxmhDihpnJ5S7flYC6
+zrtTH|Ca4Sj-tZ#ym*&7HA-+j^0qUANBftY}TuNtTaac%5LS}3<oe`w(Ajh*%Ox1&b
+zhHHFigBH`{LQ84;l>i$59vTM=oX0MqA3=HviFqhMIPx~(k$wQKL}Kg*$cm0V>2)OD
+z2Zm^e?}teJ6B4f?v4q5HNc<Q)8m%KZ=`C<N+Du7rLK}EJ+G<!vgFgp<jYh%eQGb>6
+z3vepN8Qz7~3<vjjH{9Qi%_jsQ{fr=qCq;oD7#)!`IQ&iIvK!W)#a7Ms*?ZTk9>6Kr
+zdxhA2c<6=+V>p#-P<QmJcOA^r4-{xVOY^EAszalBdJHVqhhvA;C!SP2%{fovUl{J~
+zT(t)a_Hfo7RwG}_+4rmy7~{SMKB#x?es~Gb*&=y5T0TOKs81%)8S>N_)0)|JzPaGr
+zlJ#vV_&TomI#w<2f+di(1oD<zU~j13TZ>s()$CudBCM`ewtA6SU|u$_)0icsl69)N
+z4$9ANJc47a7vf-CS1peD@LbP#dv2{0uzTyqRxr@eOwg1KEHp%B@|N~>1IE}syFqP4
+zbmK5Yb?$nfxUly(hJvL_wREl0)?4co&UE9SuUld0ts4QXItcR@AzUjKT{ptst##v<
+z;eFry*;Ou3^j>4DAq=bQCh`m1%*=cQX@6nAyVsBX!Qb3t!~RI^H^I(_Y(vjB?8Dt`
+zKZdQ?n4T75rN-RTNUTH*aCD`SLY5W+>D!oI53zEOtCu4#+9+tb$WhR8(St@W`kB5?
+z;$pm^&sufKg7<Y0m#j=*J9WwJ>f1(L+VU`kOxq}AYA2B1LBW7aokTy2UB;MxD{<L^
+zBgqo|?ZoA3wm(i@j^Rj;GyU6*ms_ilz70qEcCx=6oN8>Nq@TcPfj1iu<Cnnaja`us
+zVOOI^l0yP7!n>$*Jd-?(?o{`R1F|@pPD+#DP?O()?j4c_PBr=P_4m#-y+X40<9Pe0
+OhpHaN@sKnINB;xqWxh=S
+
+delta 3599
+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
+F{{yct$?X6D
+
+diff --git a/sites/__pycache__/brandwatchcom.cpython-312.pyc b/sites/__pycache__/brandwatchcom.cpython-312.pyc
+index 5ebd1469cc31e81ad06fd5e2c7ca45ec3ee272f4..c730fe43bc3d48590af16cc03d736a65d5178a8c 100644
+GIT binary patch
+literal 853
+zcmZuv&ui2`6rOChby+r01oz^>v6mV#*=-sNiin8d&5HHZ%Q8t`cc*4Eab~h%OAj9W
+z7o=COMG^l6&)z(hfG1Dh3fogpzDc%9!3TM7ChvRS`!Vmk<8%qi{+DkDKU#$RGM7ui
+zdo7DTnq!iX#7fE3+OsT@wBD1w*4%d6zYXNXs&2?48^v+XMlfYO9f@3vLdWfzp;4=7
+zZ2T4!)iKc)npzU;2pNy;&-SM!ewVmy_5lIGFxd7shu$!JNc9BhvzI$^%rbrmlIB8c
+zmf~-&sEQ@eHBF?LL6@T3X}ro$@UV>VV=*0s$=3en{o%If`@TyvQBszv5~QN*uMJbq
+z#z4_#qUK3OHpX0RhE1_3g>{4{G?J)GrsGM?nGaGJv(!tNW&<iA;Syr4s1}rKzvg-R
+zH)2CkQD)R&Jyk>pi1Z}9EkNlexngrg8PYWWVwTaUX^LlDbEW|cm{ah~piPck@)?Wg
+zPp(#Vk1Bz~VcK+KW+(AMz;xUUXgCNST+R?54`*1!F+hUsJgWnOknTe61#~CYG!<jz
+zHoa8Nzf3sN!~XvZa9fqL^fXIRb<C1XMFP_7f!nUGnJK&yWz{PoQe49*V^gRco{b6x
+zvI&zN1S_){=3y`T2B!vBO7Qc!H0xC>gH$(By(8yqq<8z{t*;xWgXgDrgY%VEFFYfy
+zm2iP>^1`*N>nV@?NQyU@Z31bIiy#d_&2&PfW6nKP7oA5~d6B|nxrSG>yvjJwY|FBK
+Ml5nxwwZa<y2csMK1^@s6
+
+literal 10357
+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
+
+diff --git a/sites/__pycache__/bumpercom.cpython-312.pyc b/sites/__pycache__/bumpercom.cpython-312.pyc
+index e0dceb71390b002cee4dd641efd836008ebc8fa5..90a70ac82f6e73f4a0addda07d84825a80a27230 100644
+GIT binary patch
+delta 4014
+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
+B;pqSX
+
+delta 3130
+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
+bL?2c8jcdodUm@86y#HTk@Mm${Uw8ix@&ias
+
+diff --git a/sites/__pycache__/completemedicallistscom.cpython-312.pyc b/sites/__pycache__/completemedicallistscom.cpython-312.pyc
+index 1012a037b16e42988f889c980349eb3976935137..a56800f80539715148cae037358210b234b0ceeb 100644
+GIT binary patch
+delta 1993
+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
+
+delta 1358
+zcmZ8fZA@EL7(VBIwD-2RwDh}|en1P9!oZ;eT<7E~nvnsC(M&N6WZV|{D)F`(D6I^}
+z9Bj)r^Cr%@EHH_QI%8b=XNgOU(?1&@LMVX{vhV|ckQl}3kLiBkxfSr^B<H@*`#jJ4
+z=Dg>gZ(7baWlZaI8blV}wsj@kw=*`>&a&EIbAMk%3d!M<J<W2cx9?P2Pjj?07K%0}
+z|4^T&Fqa(FJfPu(5H|BMqf)M{IF<|!5*@HE<l;;y(+^`KBn-va1V8G_Am|Vvs69e!
+zV-|SJa8PHth0}E?A;bk}6Wq+(C}5o`&BV}ZJO+=94l1Apqv-(1g(kJEBIbY&B-6On
+z(B2mbcgnr3?Qe$KyHE5DM0G?2qd8Xt1Qe4UJ(jF8U%;?zu^UqE{a@Mc*cM8w7u+=|
+zrWP`-=bh`etg8d>56ou=7j1{;8S@HbUS`AvMqFZ?@RK#Gphb<)Rm39+$MJO}QE}=z
+zy1^uvot)muS!lK8v8*yUl-m3+s1%e?$0!ogOH#i>VqB$sB`%HAjKnKA!F3=>^D$2F
+zF*a>iygb~u<>@tXTGDnGAS4^&nl2u0>s%n(HJO?(guR>7#<g8Ks1{6c#QqA_!VUWm
+zw6-fR&5StWgxPlVrkQUIW;i1bDvbE*u1D+M>*Ro;tUB5wWy4Db6Fkgv?|O7Odmb?^
+zLQa;OiYrY#5O$VeFW?L_eCE^<dnx>yVbXKEc8rF!UC)qXJE<WKXjdKHfCg7F_Q9ab
+zkJ||LWVR%XJc_w?Czo<}+6lR&wse>NCl39qd!z`CyIeSrw97Ava1u%w-!=B*el$Qg
+zp?=(i{$?&t|6d8@!!Pa$yb6~+pHQ20vOK#MQ=1qDbKEeMlLPn3#HZn;Hy3{ZA9-Ci
+z<xQ<pebH4_M<^DGoRT?0$Y)^AE2>5nI1E2~MLYt$F9)B4B3~iA?kiD^DbhGx^7$zF
+zz2uiZC$`=r)Ei_+FVP5{MqAWtn61Lejob=qXkBzq6kIEq_dUNTR*vacINLJkTHstM
+z&a=kpE`~2h#v>oTJZW0Y$V+kgYn=H?>tx5L;hTLau6*6$ny_E9&wCFpI)Y;vE1Y$i
+zb1rbs6zATP4lO#K`>(XcsQ4PZA!N=QYf|vJ-(hkhmOocFTsL}jUF(@=Jdc0xhE2a0
+z*Mm?{#Hh(xAz0uYS`x}0uj%cN5az4!no?hWm%dZ|wQ5<YTo5XsY|)Ca{bWn0l>8aJ
+zKt>*^t!QA;cfkWkOVIZvFRDoLpv+${qUjR8-bPPXSn7@RjG*u{MwT!$Hd?_V-$2nb
+zK1=;!dgfVHVGdWagqo!kd6wlH_tCR@e?tW|TaFw3^lSy+=wauOrBP((EG%K>L{?!u
+zw1WL?<36|*cp6W^!@$|6CdtWGx!$(!kklzh<+Do4^mImJaxZ~$`tSBDNO=SDJ-AsY
+Y;-%!>!Wg69k6pio@o|i^<p>e~0<O7e5dZ)H
+
+diff --git a/sites/__pycache__/contactoutcom.cpython-312.pyc b/sites/__pycache__/contactoutcom.cpython-312.pyc
+index 81ef7a3cc9ff39566ac0ed108fd7372e05a2b5e2..d90c6a715d8b348d59520847200f9c1f365386ef 100644
+GIT binary patch
+delta 2729
+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
+GPyYe5f10iU
+
+delta 2649
+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
+DXNiRB
+
+diff --git a/sites/__pycache__/demystcom.cpython-312.pyc b/sites/__pycache__/demystcom.cpython-312.pyc
+index d850ee2ef4c3ab9eef483add8c110cdb4a3d0811..6c712922d53059f23edcc47e5aad5b6ac36f31ee 100644
+GIT binary patch
+delta 3630
+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
+
+delta 2516
+zcma)8ZERCj7(S=>-uB+E-)rgjZrgS3y0T&Un1Zr(63u{wF_aL@bZ)z4tZpsb-q}s=
+zrASDCWJdIufFVYLF@o?%mlzUJ;}8FU*;*MHY52hpV<JDy6cY@@;JMq*TIPtJ=H7G8
+z^PcxP&->o<(QkL(-)_2YH0l8^@R2jU-S>s5MERmyHudDQ86hR^8y)TuQzO|o`-XdR
+zLsBZ&Gx-a3S)=c#0XPk0C_r??9Gv_{`!{8g^=Z3GL<*YHdmT`)xiN4FE}#&MgIMjC
+zHLVZ{hUYEXTxvKqAeD9f<GoU9OhR87KG#2uhqmA+_uXXLcoFv8qOG&Et3<nI=|G7N
+zoO51qmV$|!^jcA!ZU8G;DlBeM__=4`RDB!}pbXCfK_hF<f{$p0UhGqgeFn+qI67pG
+zbZAwTicZoHE<yJeZpvEqEwJ<Lc|_pUw!#hqL4O`99Ik6{tw$zH9M+&smN?pI2|zP?
+z#S(9~2-ZuBjEYIt%Qf?}m?a~bMK;Jr*(94UEk>bOB=eGuLvxlbMypH-wQn>6AX;QA
+zN?K!P>t#F1r(%<BXv`Wn+hjmyf&gQBXOfm}=^#2t`(Bjl38&yBo)Ac0g38Oh(_vz%
+z)afV+*zD-3TGoeMS0u#q`4<Oqak~b{cEL@iQyfx^kjV~$VyTWauWBq*QF^M(ww1LI
+zs!A<*D_&JxRq?9wD&t9O(XRvdl~wYp6^Hl;wc@ObqMF({ABCS^+22q6(K(yFAk>kr
+z;;N!^5frDlnW#&<NUKuIOCuGxw1(gUF9gU6*Z>rd>`5nxty0VGG+c}GU5oZOJT+Bc
+z5gpOl(J6<c5EM*=M)67;h^xGmUd2}tErcqfIUxJe>fT*eu(0~e;U!Lgm3KqMo1g`}
+z=lnwC@iT)UO5GDaP$MBy0@7wOzZ@vkk!kTlTlv$(mOO)UFwFxb(q329`e`C|va4R^
+z0MUvMhIqyNB&T#c5mc#Vw&GW?r90Fe&{<$#0`(vPaxkxfU@w69cM488$Edv^59@*S
+z3?T>ukyrRC8Byt3Vw3sz-OhIYFh4OP00q~1m<RuZV)ZhLf=V&+9~7@C{A1~8u7tI6
+zI&iQnq@z%kj!b+Z(#0d_U!k@v)0x0JGwgDmd%*%SF}vInTZ8s{-h<`I2Ob$hi1NMw
+ziu!}huj)CCI{nA3mfl_=o6ihq`-GIxGIC%Y`py3-&8X(-x{Fj$Y(R(jU6E}V5Y@}3
+zObw<aQC<0BM14h7Oed!HiK*OvbeH$SM${hgG&6Y--=JmPKsF<#GLooXR%NDdR2a&Z
+zxfjL;QU|1=Y(`X%NwE&q1l)8iBsQaW0!`>@phc@*iQ*bG7dU7aSF5hZ+-U#Ekks2h
+zDoNQ48V_EiLl{SikP9V49O?|&Rvp8@Zv5nu_<}hC<}_oFNy14f)C)WBxO^Y8AF{>Z
+zb2nU@PZ)2pj#<`QV!bo0{|;+-*KpD>VY<y4PxMW&KeNs=^qIjKHlkX%liV!Jmsq|S
+z*gV6wAvyem$re5*+%U%H0OVp9BqTI+bD{ND)}QLR;YgyN8V;imA`zPpFx>I2Z*M)e
+z{Z0*Er1|@=qI;2$p=1a@oTDJu@bJ$t3Pzh~9oC3;L_>v}h7Et+HoN}7tVwv=U@h8O
+zuTob!zShnf+DnG^d9NgV^l;9ox;)5zf<ryJO}o<vuCcxy8>wsIcHF)mPIPI(kB*Ke
+z+?fK=t^}Cc$aGP<sWuiP(^{^pg_<@yx?<FHm{E}!qarPPD7BN|cDkwQO^%&*s%Tct
+zMLUC$qFc2VecUdJDn_E+CQZo*yW6OeiR*4<N=`?2f+?+LR3yQuNGqkb+n8Mx`n_?j
+zcMsNDW`#Z}B@K<F%G`nRzELSVI65T0j@n{J;coPO%xzg%4S49n0y~E8#ytAdxUc@9
+W%6*1RP3Mj4?(KjIgn{}0L;nDZq}T2M
+
+diff --git a/sites/__pycache__/faradayio.cpython-312.pyc b/sites/__pycache__/faradayio.cpython-312.pyc
+index 849f19931fd1f6c888f3d68f29546ba73002cc65..1188f16143d898093556e8f3575e1e2f09f9c1e1 100644
+GIT binary patch
+literal 4333
+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
+
+literal 6636
+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
+WZM{RQ+Z%eBfjciS`xwF8!G8c24+L@m
+
+diff --git a/sites/__pycache__/findpeoplesearchcom.cpython-312.pyc b/sites/__pycache__/findpeoplesearchcom.cpython-312.pyc
+index 18897e23fcf64675b80365e22880a86e8767e5a9..96621f7fd793a6d795992c7cb10f04035f2dc05f 100644
+GIT binary patch
+delta 424
+zcmXYs&r1S96vuZ>%^&1NcTo!)h(HZZMG6!Of}jW`DC)QjJELy7JL}9y(4{Eo8Zw9e
+zh#-*ug3fiS+g|z;3iQ;eS?j_3%$x6fZ|1$v&G(hW>%u}zk=A*7Is4GZi9~RIiCG-8
+zbureH&j-Oov^Xd8zE9E;4+>Z1F*Bq-{>L|JA<(|O_j|4ypkq16#l-Dnh9Nb3Ws}&z
+zAs2vRWKnE#1~>r_9L=(OWauCUAObGzVvskX%ZIWO)GD=&Qnga5)C*0(dl(Rxm&lO+
+z)j<c%M1NWUDF$8Q;6mC<CEJAW+wyZ8I~=23N(mJWZ8hdadKe-(6cb1*>t4(-EZZfN
+z8-^F{Vs2OnJ7T0+A)1%_i68A$oap(m7c>dN;#S{TYf1f3I?G60E7PzN&wVS(vKyEv
+zN_-HIacB^rn%_RnjMS#M%WfCz^6Euwc<!&yykOsAoTj8mw|wM$RDHC>S2n965nFtV
+K9;+&tJ@gCq;Cgoe
+
+delta 2823
+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
+C_r6pB
+
+diff --git a/sites/__pycache__/fmadatacom.cpython-312.pyc b/sites/__pycache__/fmadatacom.cpython-312.pyc
+index 92ea296290622a70e70e101a4c6f0657299d0053..3780d86ff206be94d2e2b807959153ffb8aeb59e 100644
+GIT binary patch
+delta 2112
+zcmah~du&rx7(b`?-u2$Lce{Puu}9Z#<1q^BC>xH)oUi~wX9N<6Iti(_y=Pmut{wN@
+z?&U2-#biW~$5H2tnCL$yBLp&IjEV`Gzy|+x*%D?&!@tCsR5KHV#CUGEI+zKb=6vTn
+z-}n2T_w<~v4}AYTe~afWfDGTIYdv3H;eR%pooZA=>V}CTHf4f66DKT<lv6Yy#*j;7
+zp$lHLkDKtctAf^{?7)d)KXl^X_#|Jx00Mx>U3s~PFA#0%#I53TxOv18i-sG*N}?Aj
+zp>7oGM~a%YshXsrkQ5FpXut=vY^Rdwi$zr}%N#T`BR+hs#DlHEe#qm)!VbX_3Pt<+
+z6N(lJDQOZAUlOiZ#t7plQ@uVBwYS6Ck9#t{)=5uh?@P0uj@zEjX-{XSE1pRVOm_{=
+zc!p-_Vf=$*XkCB-U<}A0MRP!gI{XO8Cf)QAxIm|v#XYsK$ETfjX2vKmWyWWm>$kI-
+ziEQ#iHjj{1&r_Mr^LZ+B2A|@(fNc2`rYstXwlH)H{>!<Vx9XH^?Oh9iBIs6Zw|TK{
+z<s7>8qHP>508_M1_we|4s}m2o+98d9a6Lunxl$1qi_L`FEy{RYtgW~xjxXkuvg>xa
+zG@q%182b$4)hl#IK@WjeQpiItD+Gc-UvOK!!ooOpXHO-*VspRD0d4ia;EE;iBQ7eJ
+zq$J$>0(xoHxknMNIXM!lXQSaht#b!~F;@buzF@ElDBhIok+5!ULqVsz3a*x_=`g;Z
+z>zM1*wuN;N4uT=70}R4tUOQ5*$I7W1PcL@)v6lRAJ?Tg4dHu<$d!C&73x(WYU#wv%
+z_y4JdhM*(gxusfl`n8&+)~*{|o*8AB43ghMa|)}^i!YR)hYxU|;)|*`NTaikLoe>%
+z*>>R2&b@7+wgbV?bGtjTV5GGBd}V2R)kbNH6lq3{{y=AQ#J>qO1^nTrrY(NdxV3TX
+z<_L;x4hMXutl79kdeLx}N-D7|9ZAS&WMV*4s<l>0=}PvYxTYQs9BGjgk^H9NXc8&I
+z2T=?~w1m<Yi><BI(2yo6NID#s`cP|Kw?88Fr?p78<X4c|pNOld?nwPIP#4h=*fLbD
+zuc0%c?3N<kYde$ih!#!6*COAms6o|+W2ixns{Ju(xV0`EOGJ9>T2RA)6icF3ttI7a
+zxn~@aky1_S+7^xXW2gHnRj!=CGwxOJLww&Ic;!u^S4ItD+(B7WLd_O+Aq~X`6xNWQ
+zG^A|zVpiEAB^eL(sM%tI38@hUp}5+e(6Zd_p$O_XQd8bCEa;=jsOA%u(|D|E9iyBg
+zGJLJ7q3CVH=NbHG)hhTN_IjF2c{LgCi)x{8QqvOgEJUhtS>tJsi0^qE6<5jT5Si*v
+z<a#&`=By>hcjZjaK}MXgdjl{%ZvhV1Soyi~Oy!2ljv4!=(V{!{%J-k0v9BZ?%V&z$
+z%(8WJ&aI>DoU@G(`-(B|Iq&CXmxs=JXY4yhi{?tivz;f8jnZ?h?Tq!LHD@yML3p=)
+z-@KXP4#0U9aK)q2DfVue`xEv9HdC{8rfl0NKgWu<*-E^xrhbhF*o2I=GH0TAaZYfJ
+zap$;qtT`6gsx!1VWAzexf8K{L*Q}#hrWpTHQ=6W(J(VjWj_=PiKq&tMKyC-TW3y)*
+z&EHaAwS7}`+qOMp+djwg4|9y6`#Z-I(}(kJ;Ho0%e4M*^&p9*MJ<OT^o5Q=-`*)n~
+zJo-n$m7@smfq`>BP}851mY#T)-_ruFJL>ib;QG@-uo~PDxIJ5_8|C7jChA55L$o)V
+z7(=p!GWZrQSVc`Tb$k7$$$A(pqbB`aP-G^X#h}1USs5ak5*Q+x5-Ec(V+ek#iV6n6
+zR5cg$Q&Yr>&;YfjU8JTq3GEDhlZJ%9$#Cs<^UY$D!3)sf?R2|{zpJf>pW|O^-+bmX
+zl5m#olX{UHC9kd{sY?0hbyqb1e~^^nEN#5HN*@8{kDxMWaK@oluHsKtR=~`}*DD8U
+MZa;+8N}P!Q0WM=6Z~y=R
+
+delta 2385
+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
+
+diff --git a/sites/acbjcom.py b/sites/acbjcom.py
+index 682bf0f..373eda8 100644
+--- a/sites/acbjcom.py
++++ b/sites/acbjcom.py
+@@ -110,6 +110,9 @@ def fill_input_data(page, dataRow) :
+     _human_type2(zip_input, str(dataRow["Zipcode"]))
+ 
+ def acbjcom(dataRow, website_name, in_user_email, run_mode) : 
++    # 2026-10-04: NotImplementedError -> manage.py parks the row as step 4
++    # ("no automation") instead of retrying a dead site every day.
++    raise NotImplementedError("acbjcom: ACBJ's OneTrust webform 161633e1-.../a87fe61a-... returns 'The requested content is no longer available' (captured 2026-10-04) and acbj.com blocks server fetches; needs a browser survey for the new privacy-request link")
+     page = None
+     
+     try : 
+diff --git a/sites/accudatacom.py b/sites/accudatacom.py
+index fe4c988..ac6bc78 100644
+--- a/sites/accudatacom.py
++++ b/sites/accudatacom.py
+@@ -58,6 +58,15 @@ def fill_input_data(page, dataRow) :
+     fName = dataRow["Name"].split()[0] # split string based on space to get first name
+     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+ 
++    # 2026-10-04 survey: privacy.deepsync.com rebuilt the form. Fields are now
++    # first_name / last_name / emails[] / phone_numbers[] / address[] /
++    # city[] / state[] / zip[] (ids *_ctx1 for the first row), a "Who is
++    # this request for?" radio and a requests[] checkbox list. Turnstile and
++    # #submit_button are unchanged. 0/105 runs got past the old #who_address.
++    who = page.ele("tag:input@@name=request_type@@value=opt_out", timeout=5)
++    if who:
++        who.click(by_js=True)
++
+     first_name = page.ele("tag:input@@id=first_name")
+     first_name.clear()
+     first_name.click()
+@@ -68,37 +77,40 @@ def fill_input_data(page, dataRow) :
+     last_name.click()
+     _human_type2(last_name, lName)
+ 
+-    email_input = page.ele("tag:input@@name=email")
++    email_input = page.ele("tag:input@@id=email_ctx1")
+     email_input.clear()
+     email_input.click()
+     _human_type2(email_input, generate_email(dataRow["Name"]))
+ 
+-    phone_input = page.ele("tag:input@@name=phone")
+-    phone_input.clear()
+-    phone_input.click()
+-    _human_type2(phone_input, generate_phone_number())
+-
++    phone_input = page.ele("tag:input@@id=phone_ctx1", timeout=2)
++    if phone_input:
++        phone_input.clear()
++        phone_input.click()
++        _human_type2(phone_input, (dataRow.get("Phone Number") or "").strip() or generate_phone_number())
+ 
+-    street_input = page.ele("tag:input@@id=who_address")
++    street_input = page.ele("tag:input@@id=who_address_ctx1")
+     street_input.clear()
+     street_input.click()
+     _human_type2(street_input, dataRow["Address"])
+ 
+-    city_input = page.ele("tag:input@@id=who_city")
++    city_input = page.ele("tag:input@@id=who_city_ctx1")
+     city_input.clear()
+     city_input.click()
+     _human_type2(city_input, dataRow["City"])
+ 
+-    state_select = page.ele("tag:select@@id=who_state")
++    state_select = page.ele("tag:select@@id=who_state_ctx1")
+     __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
+ 
+-    zip_input = page.ele("tag:input@@id=who_zip")
++    zip_input = page.ele("tag:input@@id=who_zip_ctx1")
+     zip_input.clear()
+     zip_input.click()
+     _human_type2(zip_input, str(dataRow["Zipcode"]))
+ 
+-    checkbox_element = page.ele("tag:input@@id=request_type_5")
+-    checkbox_element.set.attr("checked", True)
++    # "Do not sell or share" + "Please delete my personal information".
++    for cb_id in ("request_type_1", "request_type_5"):
++        cb = page.ele("tag:input@@id=" + cb_id, timeout=2)
++        if cb and not cb.states.is_checked:
++            cb.click(by_js=True)
+ 
+ def accudatacom(dataRow, website_name, in_user_email, run_mode) : 
+     page = None
+@@ -146,11 +158,7 @@ def accudatacom(dataRow, website_name, in_user_email, run_mode) :
+         
+         sleep(0.3)
+ 
+-        captcha_widget_div = page.ele("tag:div@@data-theme=light")
+-        print(captcha_widget_div)
+-        div_element = captcha_widget_div.children()[0]
+-        turnstile_response_element = div_element.ele("tag:input@@name=cf-turnstile-response")
+-        page.run_js("arguments[0].value = arguments[1];", turnstile_response_element, Code)
++        __import__("lib.broker_helpers", fromlist=["set_turnstile_response"]).set_turnstile_response(page, Code)
+ 
+         sleep(1)
+ 
+diff --git a/sites/acxiomcom.py b/sites/acxiomcom.py
+index 3519bf8..c498d59 100644
+--- a/sites/acxiomcom.py
++++ b/sites/acxiomcom.py
+@@ -7,7 +7,7 @@ import os, datetime, pyautogui, requests
+ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from cloudsolver.extension import proxies
+-from lib.broker_helpers import select_onetrust_state
++from lib.broker_helpers import select_onetrust_state, select_onetrust_country
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -98,6 +98,10 @@ def fill_input_data(page, dataRow) :
+     sleep(random.uniform(0.1,0.5))
+     _human_type2(city_input, dataRow["City"])
+ 
++    # 2026-10-04: the form moved to omnicom-privacy.my.onetrust.com and now
++    # has a required Country field that gates the State list (0/81 passed
++    # this point in the 24 Sep-2 Oct logs). Country first, then state.
++    select_onetrust_country(page)
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+@@ -108,6 +112,13 @@ def fill_input_data(page, dataRow) :
+     sleep(random.uniform(0.1,0.5))
+     _human_type2(zip_input, str(dataRow["Zipcode"]))
+ 
++    # Phone Number is required on the new form.
++    phone_input = page.ele("tag:input@@id=phoneNumberDSARElement", timeout=3)
++    if phone_input:
++        phone_input.click()
++        sleep(random.uniform(0.1,0.5))
++        _human_type2(phone_input, (dataRow.get("Phone Number") or "").strip() or generate_phone_number())
++
+     return email_address
+ 
+ def acxiomcom(dataRow, website_name, in_user_email, run_mode) : 
+@@ -164,7 +175,7 @@ def acxiomcom(dataRow, website_name, in_user_email, run_mode) :
+         # ac = Actions(page)
+ 
+         main_tab = page.latest_tab
+-        main_tab.get("https://privacyportal.onetrust.com/webform/342ca6ac-4177-4827-b61e-19070296cbd3/7229a09c-578f-4ac6-a987-e0428a7b877e")
++        main_tab.get("https://omnicom-privacy.my.onetrust.com/webform/c0a325be-6f68-46be-a0de-e4a750890f7d/257a5cb1-b4b6-4ff1-bb7a-687c056fac91")
+ 
+         sleep(random.uniform(1, 2))
+         
+diff --git a/sites/advancedpeoplesearchcom.py b/sites/advancedpeoplesearchcom.py
+index 080e3e5..917ff0e 100644
+--- a/sites/advancedpeoplesearchcom.py
++++ b/sites/advancedpeoplesearchcom.py
+@@ -86,6 +86,9 @@ def fill_input_data(page, dataRow) :
+     submit_button.run_js("this.click();")
+ 
+ def advancedpeoplesearchcom(dataRow, website_name, in_user_email, run_mode) : 
++    # 2026-10-04: NotImplementedError -> manage.py parks the row as step 4
++    # ("no automation") instead of retrying a dead site every day.
++    raise NotImplementedError("advancedpeoplesearchcom: advancedpeoplesearch.com is a parked domain for sale on Afternic (captured 2026-10-04); the people-search site no longer exists")
+     page = None
+     try : 
+         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
+diff --git a/sites/affinitysolutionscom.py b/sites/affinitysolutionscom.py
+index bee812b..0bf86bd 100644
+--- a/sites/affinitysolutionscom.py
++++ b/sites/affinitysolutionscom.py
+@@ -6,7 +6,7 @@ import os, datetime, pyautogui, requests
+ from lib.common import generate_email, generate_phone_number
+ from twocaptcha import TwoCaptcha
+ from cloudsolver.extension import proxies
+-from lib.broker_helpers import select_onetrust_state
++from lib.broker_helpers import select_onetrust_state, select_onetrust_country, solve_image_captcha_element
+ 
+ now = datetime.datetime.now()
+ current_date = now.strftime("%Y-%m-%d")
+@@ -73,6 +73,8 @@ def fill_input_data(page, dataRow) :
+     sleep(random.uniform(0.1,0.5))
+     _human_type2(city_input, dataRow["City"])
+ 
++    # 2026-10-04: required Country autocomplete now gates the State list.
++    select_onetrust_country(page)
+     state_select = page.ele("tag:input@@id=stateDSARElement")
+     state_select.click()
+     sleep(random.uniform(0.1,0.5))
+@@ -107,13 +109,16 @@ def fill_input_data(page, dataRow) :
+     phone_input.click()
+     print("typing the email...")
+     sleep(random.uniform(0.1,0.5))
+-    _human_type2(phone_input, dataRow["Phone Number"])
++    _human_type2(phone_input, (dataRow.get("Phone Number") or "").strip() or generate_phone_number())
+ 
+-    birth_date = make_standard_num(dataRow["Birth Month"]) + "/" + make_standard_num(dataRow["Birth Day"]) + "/" + make_standard_num(dataRow["Birth Year"])
+-    birth_input = page.ele("tag:input@@id=dateOfBirthDSARElement")
+-    birth_input.click()
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(birth_input, birth_date)
++    # Date of birth was dropped from the form (2026-10-04 capture); fill it
++    # only if it comes back.
++    birth_input = page.ele("tag:input@@id=dateOfBirthDSARElement", timeout=2)
++    if birth_input and dataRow.get("Birth Year"):
++        birth_date = make_standard_num(dataRow["Birth Month"]) + "/" + make_standard_num(dataRow["Birth Day"]) + "/" + make_standard_num(dataRow["Birth Year"])
++        birth_input.click()
++        sleep(random.uniform(0.1,0.5))
++        _human_type2(birth_input, birth_date)
+ 
+     
+ 
+@@ -174,48 +179,16 @@ def affinitysolutionscom(dataRow, website_name, in_user_email, run_mode) :
+ 
+         fill_input_data(page, dataRow)
+ 
+-        page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA")
+-        sleep(1)
+-        
+-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
+-        rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
+-        print(rc_anchor_container)
+-        rc_anchor_container.click()
+-
+-        sleep(2)
+-        page.wait.ele_displayed("tag:iframe@@title=recaptcha challenge expires in two minutes")
++        # 2026-10-04: the form swapped reCAPTCHA for a BotDetect image captcha
++        # (#angularBasicCaptcha_CaptchaImage -> #captchaCode).
+         sleep(1)
+-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
+-        audio_button = iframe_container1.ele("tag:button@@id=recaptcha-audio-button")
+-
+-        print(audio_button)
+-        audio_button.click()
+-        audio_source = iframe_container1.ele("tag:audio@@id=audio-source").attr("src")
+-        print(audio_source)
+-
+-        response = requests.get(audio_source)
+-        with open(("__downloaded_%d.mp3" % __import__("threading").get_ident()), "wb") as file:
+-            file.write(response.content)
+-
+-        sleep(1)
+-
+-        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
+-        solver = TwoCaptcha(apiKey)
+-        print("Captcha is solving...")
+-        try :
+-            result = solver.audio(("__downloaded_%d.mp3" % __import__("threading").get_ident()), lang="en")
+-            print("Captcha is solved.")
+-            print(result["code"])
+-            Code = result["code"]
+-        except Exception as e:
+-            print("Error: ", str(e))
+-        audio_reponse_input = iframe_container1.ele("tag:input@@id=audio-response")
+-        _human_type2(audio_reponse_input, Code)
+-
+-        verify_btn = iframe_container1.ele("tag:button@@id=recaptcha-verify-button")
+-        verify_btn.click()
+-
+-        sleep(5)
++        captcha_img = page.ele("tag:img@@id=angularBasicCaptcha_CaptchaImage", timeout=8)
++        if captcha_img:
++            code = solve_image_captcha_element(page, captcha_img, "affinitysolutionscom")
++            captcha_input = page.ele("tag:input@@id=captchaCode")
++            captcha_input.click()
++            _human_type2(captcha_input, code)
++            sleep(0.5)
+ 
+         submit_button = page.ele("tag:button@@id=dsar-webform-submit-button")
+         submit_button.click()
+diff --git a/sites/alescodatacom.py b/sites/alescodatacom.py
+index 2e7411c..375618c 100644
+--- a/sites/alescodatacom.py
++++ b/sites/alescodatacom.py
+@@ -1,187 +1,14 @@
+-from DrissionPage import ChromiumPage, ChromiumOptions
+-from time import sleep
+-import json
+-import random
+-import os, datetime, pyautogui, sys, requests
+-from twocaptcha import TwoCaptcha
+-from lib.common import generate_email, generate_phone_number
+-from lib.email_verification import do_email_verification
+-from cloudsolver.extension import proxies
++from lib.broker_helpers import run_ccpa_email_optout
+ 
+-now = datetime.datetime.now()
+-current_date = now.strftime("%Y-%m-%d")
+-base_dir = os.getcwd()
+ 
+-screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
+-os.makedirs(screentShotDir, exist_ok=True)
+-
+-def get_chromium_options(arguments: list) -> ChromiumOptions:
+-    """
+-    Configures and returns Chromium options.
+-    
+-    :param browser_path: Path to the Chromium browser executable.
+-    :param arguments: List of arguments for the Chromium browser.
+-    :return: Configured ChromiumOptions instance.
+-    """
+-    options = ChromiumOptions()
+-    # options.no_imgs(True)
+-    # options.no_imgs(True).mute(True).no_js(True)
+-    # options.set_argument('--auto-open-devtools-for-tabs', 'true') # we don't need this anymore
+-    for argument in arguments:
+-        options.set_argument(argument)
+-    return options
+-
+-def _human_type2(element , text: str) -> None:
++def alescodatacom(dataRow, website_name, in_user_email, run_mode):
++    """2026-10-04: /do-not-sell-my-personal-information/ is a 404. The
++    replacement, alescodata.com/privacy-center/, embeds a HubSpot form that
++    only renders in a browser, and its text states: "you can also opt out of
++    the sell of your personal information by emailing us at:
++    privacy@alescodata.com". Use that documented route until the HubSpot
++    form has been captured and scripted (0/73 runs succeeded before).
+     """
+-    Types in a way reminiscent of a human, with a random delay in between 50ms to 100ms for every character
+-    :param element: Input element to type text to
+-    :param text: Input to be typed
+-    """
+-
+-    for c in text:
+-        element.input(c)
+-
+-        sleep(random.uniform(0.05, 0.1))
+-
+-def make_standard_num(num) :
+-    ret = str(num)
+-    if len(ret) < 2 : ret = "0" + ret
+-
+-    return ret
+-
+-def fill_input_data(page, dataRow) : 
+-    
+-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
+-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+-
+-    fName_input = page.ele("tag:input@@id=et_pb_contact_first-name_0")
+-    fName_input.clear()
+-    fName_input.click()
+-    print("typing the first name...")
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(fName_input, fName)
+-
+-    lName_input = page.ele("tag:input@@id=et_pb_contact_last-name_0")
+-    lName_input.clear()
+-    lName_input.click()
+-    print("typing the last name...")
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(lName_input, lName)
+-
+-    email_str = generate_email(dataRow["Name"])
+-    email_input = page.ele("tag:input@@id=et_pb_contact_email_0")
+-    email_input.clear()
+-    email_input.click()
+-    print("typing the email...")
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(email_input, email_str)
+-
+-    phone_input = page.ele("tag:input@@id=et_pb_contact_phone_0")
+-    phone_input.clear()
+-    phone_input.click()
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(phone_input, dataRow["Phone Number"])
+-
+-    comment_textarea = page.ele("tag:textarea@@id=et_pb_contact_comments_0")
+-    comment_textarea.clear()
+-    comment_textarea.click()
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(comment_textarea, "I want to remove my info from your site.")
+-
+-    captcha_input = page.ele("tag:input@@class=input et_pb_contact_captcha")
+-    first_num = captcha_input.attr("data-first_digit")
+-    second_num = captcha_input.attr("data-second_digit")
+-    sum = int(first_num) + int(second_num)
+-    captcha_input.clear()
+-    captcha_input.click()
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(captcha_input, str(sum))
+-    sleep(1)
+-
+-    submit_btn = page.ele("tag:button@@name=et_builder_submit_button")
+-    submit_btn.click()
+-
+-    sleep(1)
+-    
+-def alescodatacom(dataRow, website_name, in_user_email, run_mode) : 
+-    page = None
+-    try : 
+-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
+-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
+-
+-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
+-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+-        screenshot_save_path = screentShotDir + "\AlescodataCom_" + fName + "-" + lName + ".png"
+-        
+-        arguments = [
+-            "-no-first-run",
+-            "--start-maximized",
+-            "-disable-javascript",
+-            "-disable-gpu",
+-            "-disable-sensors",
+-        ]
+-
+-        port_arr = [
+-            "10001",
+-            "10002",
+-            "10003",
+-            "10004",
+-            "10005",
+-            "10006",
+-            "10007",
+-            "10008",
+-            "10009",
+-            "10010"
+-        ]
+-
+-        random_number = random.randint(0, 9)
+-
+-        
+-        #Launch Website
+-        username = os.getenv("SMARTPROXY_USER", "")
+-        password = os.getenv("SMARTPROXY_PASSWORD", "")
+-        endpoint = os.getenv("SMARTPROXY_ENDPOINT", "isp.smartproxy.com")
+-        port = port_arr[random_number]
+-
+-
+-        print(endpoint + ":" + port)
+-        proxy_extension = proxies(username, password, endpoint, port)
+-
+-        options = get_chromium_options(arguments).auto_port().add_extension("extension")
+-
+-        if run_mode == "headless" :
+-            options.headless()
+-
+-        #Launch Website
+-        page = ChromiumPage(addr_or_opts=options)
+-        page.get("https://alescodata.com/do-not-sell-my-personal-information/")
+-
+-        fill_input_data(page, dataRow)
+-        
+-        try :
+-            # response = requests.get(sucessConfirmationApi, timeout=10)
+-            print("Success Confirmation API is sent successfully!")
+-            sleep(10)
+-            page.get_screenshot(screenshot_save_path)
+-        except Exception as e:
+-            print("Success Confirmation API is failed: ", str(e))
+-        
+-    
+-    except Exception as e:
+-        try :
+-            # response = requests.get(errorConfirmationApi, timeout=10)
+-            print("Error Confirmation API is sent successfully!")
+-            sleep(10)
+-            page.get_screenshot(screenshot_save_path)
+-        except Exception as e:
+-            print("Error Confirmation API is failed: ", str(e))
+-        raise
+-
+-    finally:
+-        if page is not None:
+-            try:
+-                page.quit()
+-            except Exception:
+-                pass
+-
+-    return screenshot_save_path
+\ No newline at end of file
++    return run_ccpa_email_optout("alescodatacom", dataRow,
++                                 privacy_email="privacy@alescodata.com",
++                                 run_mode=run_mode)
+diff --git a/sites/americaphonebookcom.py b/sites/americaphonebookcom.py
+index 5780a24..db94385 100644
+--- a/sites/americaphonebookcom.py
++++ b/sites/americaphonebookcom.py
+@@ -46,22 +46,37 @@ def make_standard_num(num) :
+     return ret
+ 
+ def fill_input_data(page, dataRow) : 
+-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
+-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+-    sleep(1)
+-
++    # 2026-10-04 survey: contact.php no longer has a removal form. The site
++    # says "CLICK REMOVE NEXT TO THE LISTING YOU WANT REMOVED": reverse-search
++    # the phone number, then click the Remove link beside the listing.
++    import re as _re
++    helpers = __import__("lib.broker_helpers", fromlist=["missing_pii", "log_step"])
++    phone = _re.sub(r"\D", "", dataRow.get("Phone Number") or "")
++    if len(phone) == 11 and phone.startswith("1"):
++        phone = phone[1:]
++    if len(phone) != 10:
++        raise helpers.missing_pii("Phone Number")
++
++    page.get("http://americaphonebook.com/")
++    sleep(random.uniform(1, 2))
+     phone_input = page.ele("tag:input@@name=number")
+     phone_input.click()
+     sleep(random.uniform(0.1,0.5))
+-    _human_type2(phone_input, dataRow["Phone Number"])
+-
+-    zip_input = page.ele("tag:input@@name=zip")
+-    zip_input.click()
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(zip_input, str(dataRow["Zipcode"]))
+-
+-    submit_button = page.ele("tag:input@@value=Request Removal")
+-    submit_button.click()
++    _human_type2(phone_input, phone)
++    search_form = page.ele("tag:form@@name=searchform2")
++    search_form.ele("tag:input@@type=submit").click()
++    sleep(3)
++
++    if "no match in our free White Pages database" in (page.html or ""):
++        helpers.log_step("americaphonebookcom", "number not listed; nothing to remove")
++        return "not_listed"
++
++    remove_link = page.ele("tag:a@@text():Remove", timeout=5) or page.ele("tag:a@@href:remov", timeout=2)
++    if not remove_link:
++        raise RuntimeError("americaphonebookcom: listing page has no Remove link (layout changed)")
++    remove_link.click()
++    sleep(3)
++    return "removed"
+ 
+ def americaphonebookcom(dataRow, website_name, in_user_email, run_mode) : 
+     page = None
+@@ -88,11 +103,6 @@ def americaphonebookcom(dataRow, website_name, in_user_email, run_mode) :
+         
+         #Launch Website
+         page = ChromiumPage(addr_or_opts=options)
+-        page.get("http://americaphonebook.com/contact.php")
+-
+-        sleep(random.uniform(1, 2))
+-
+-        #Wait until captcha is solved
+         fill_input_data(page, dataRow)
+ 
+         try :
+diff --git a/sites/archivescom.py b/sites/archivescom.py
+index 51e59b3..1235bca 100644
+--- a/sites/archivescom.py
++++ b/sites/archivescom.py
+@@ -66,28 +66,45 @@ def fill_input_data(page, dataRow) :
+     sleep(random.uniform(0.1,0.5))
+     _human_type2(lName_input, lName)
+     
+-    address_input = page.ele("tag:input@@id=OptoutAddress")
++    # 2026-10-04 survey: the separate address/city/state/zip boxes were
++    # replaced by ONE autocomplete box (#OptoutAddress1Display, suggestions
++    # from OpenStreetMap) that fills a hidden #OptoutAddress1 the server
++    # validates. 0/75 runs got past the old #OptoutAddress. Type the full
++    # address, take the first suggestion, and if none comes back set the
++    # hidden field to what we typed so the form still submits.
++    state_code = __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"])
++    full_addr = ", ".join(x for x in (
++        (dataRow.get("Address") or dataRow.get("Street") or "").strip(),
++        (dataRow.get("City") or "").strip(),
++        " ".join(y for y in (state_code or "", str(dataRow.get("Zipcode") or "").strip()) if y),
++    ) if x)
++    address_input = page.ele("tag:input@@id=OptoutAddress1Display")
+     address_input.click()
+     sleep(random.uniform(0.1,0.5))
+-    _human_type2(address_input, dataRow["Address"])
+-
+-    city_input = page.ele("tag:input@@id=OptoutCity")
+-    city_input.click()
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(city_input, dataRow["City"])
+-    
+-    state_select = page.ele("tag:select@@id=OptoutRegion")
+-    state_select.select.by_value(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
+-    
+-    zip_input = page.ele("tag:input@@id=OptoutPostalCode")
+-    zip_input.click()
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(zip_input, str(dataRow["Zipcode"]))
+-
+-    phone_input = page.ele("tag:input@@id=OptoutPhoneNumber")
+-    phone_input.click()
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(phone_input, format_phone_number(dataRow["Phone Number"]))
++    _human_type2(address_input, full_addr)
++    sleep(3)
++    picked = False
++    try:
++        suggestion = page.ele("css:#OptoutAddress1SuggestionsList li", timeout=5)
++        if suggestion:
++            suggestion.click()
++            picked = True
++            sleep(0.5)
++    except Exception:
++        picked = False
++    if not picked:
++        page.run_js(
++            "var h=document.getElementById('OptoutAddress1');"
++            "h.value=arguments[0];"
++            "h.dispatchEvent(new Event('input',{bubbles:true}));"
++            "h.dispatchEvent(new Event('change',{bubbles:true}));", full_addr)
++
++    phone_raw = (dataRow.get("Phone Number") or "").strip()
++    if phone_raw:
++        phone_input = page.ele("tag:input@@id=OptoutPhoneNumber")
++        phone_input.click()
++        sleep(random.uniform(0.1,0.5))
++        _human_type2(phone_input, format_phone_number(phone_raw))
+ 
+     email_str = generate_email(dataRow["Name"])
+     email_input = page.ele("tag:input@@id=OptoutEmail")
+diff --git a/sites/beenverifiedcom.py b/sites/beenverifiedcom.py
+index bb869f9..2714a72 100644
+--- a/sites/beenverifiedcom.py
++++ b/sites/beenverifiedcom.py
+@@ -56,29 +56,28 @@ def fill_input_data(page, dataRow) :
+     fName = dataRow["Name"].split()[0] # split string based on space to get first name
+     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+ 
+-    request_type = page.ele("tag:div@@id=requestType")
+-    request_type.click()
+-    sleep(random.uniform(0.5, 1))
+-    div_select = page.ele("tag:div@@id=select-options-container")
+-    # print(div_select)
+-    delete_li = div_select.ele("tag:li@@text()=Delete My Information")
+-    
+-    delete_li.click()
+-    sleep(random.uniform(0.5, 1))
+-    div_modal = page.ele("tag:div@@class:MuiDialogContent-root")
+-    #print(div_modal)
+-    yes_button = div_modal.ele("tag:h6@@text()=Yes, I do")
+-    yes_button.click()
+-    sleep(random.uniform(0.5, 1))
+-    continue_button = div_modal.ele("tag:button@@type=submit")
+-    continue_button.click()
++    # 2026-10-04 survey: the request-type picker and the "Do you have an
++    # account?" question are now native <select>s (#requestType,
++    # #account_type_select); the MUI modal with the "Yes, I do" <h6> is gone,
++    # which is where all 26 runs died. We answer "No, I do not" (guest) —
++    # these customers are not members — and confirm the "continue with
++    # Delete?" dialog when it appears. Age is a new required field.
++    helpers = __import__("lib.broker_helpers", fromlist=["select_state", "missing_pii"])
++    form_container = page.ele("tag:form@@id=comprehensive-form", timeout=10)
++
++    request_type = form_container.ele("tag:select@@id=requestType")
++    request_type.select.by_value("rtd")
+     sleep(random.uniform(0.5, 1))
+ 
+-    form_container = page.ele("tag:form@@id=comprehensive-form")
+-    member_input = form_container.ele("tag:input@@placeholder=Membership ID")
+-    member_input.clear()
+-    member_input.click()
+-    _human_type2(member_input, "1")
++    account_type = form_container.ele("tag:select@@id=account_type_select", timeout=4)
++    if account_type:
++        account_type.select.by_value("guest")
++        sleep(random.uniform(0.5, 1))
++
++    yes_button = page.ele("tag:button@@aria-label=delete-information-yes-button", timeout=3)
++    if yes_button and yes_button.states.is_displayed:
++        yes_button.click()
++        sleep(random.uniform(0.5, 1))
+ 
+     first_name = form_container.ele("tag:input@@id=fname")
+     first_name.clear()
+@@ -95,6 +94,16 @@ def fill_input_data(page, dataRow) :
+     email_input.click()
+     _human_type2(email_input, generate_email(dataRow["Name"]))
+ 
++    age = str(dataRow.get("Age") or "").strip()
++    if not age and str(dataRow.get("Birth Year") or "").strip().isdigit():
++        age = str(datetime.date.today().year - int(dataRow["Birth Year"]))
++    age_input = form_container.ele("tag:input@@id=age", timeout=3)
++    if age_input:
++        if not age:
++            raise helpers.missing_pii("Age")
++        age_input.clear()
++        age_input.click()
++        _human_type2(age_input, age)
+ 
+     street_input = form_container.ele("tag:input@@id=street")
+     street_input.clear()
+@@ -106,12 +115,8 @@ def fill_input_data(page, dataRow) :
+     city_input.click()
+     _human_type2(city_input, dataRow["City"])
+ 
+-    state_input = form_container.ele("tag:input@@name=state")
+-    state_input.click()
+-    modal_container = page.ele("tag:div@@class:MuiPaper-root")
+-
+-    state_li = modal_container.ele(f"tag:li@@text()={__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"])}")
+-    state_li.click()
++    state_select = form_container.ele("tag:select@@id=state")
++    helpers.select_state(state_select, dataRow["State"])
+ 
+     zip_input = form_container.ele("tag:input@@id=zip")
+     zip_input.clear()
+@@ -160,27 +165,18 @@ def beenverifiedcom(dataRow, website_name, in_user_email, run_mode) :
+         except Exception as e:
+             print(e)
+ 
+-        captchaResponse_element = page.ele("tag:input@@name=captchaResponse")
+-        page.run_js("arguments[0].value = arguments[1];", captchaResponse_element, Code)
+-
+-        sleep(0.3)
+-
+-        captcha_widget_div = page.ele("tag:div@@id=captcha-widget")
+-        print(captcha_widget_div)
+-        div_element = captcha_widget_div.children()[0]
+-        turnstile_response_element = div_element.ele("tag:input@@name=cf-turnstile-response")
+-        page.run_js("arguments[0].value = arguments[1];", turnstile_response_element, Code)
++        __import__("lib.broker_helpers", fromlist=["set_turnstile_response"]).set_turnstile_response(page, Code)
+ 
+         sleep(1)
+ 
+         form_container = page.ele("tag:form@@id=comprehensive-form")
+-        submit_button = form_container.ele("tag:button@@type=submit")
++        submit_button = form_container.ele("tag:button@@aria-label=continue-button", timeout=3) \
++            or form_container.ele("tag:button@@type=submit")
+         submit_button.click()
+-        sleep(random.uniform(0.5, 1))
+-        div_modal = page.ele("tag:div@@class:MuiPaper-root")
+-        yes_button = div_modal.ele("tag:button@@aria-label=delete-information-yes-button")
+-        print(yes_button)
+-        yes_button.click()
++        sleep(random.uniform(1, 2))
++        yes_button = page.ele("tag:button@@aria-label=delete-information-yes-button", timeout=4)
++        if yes_button and yes_button.states.is_displayed:
++            yes_button.click()
+ 
+         
+         try :
+diff --git a/sites/brandwatchcom.py b/sites/brandwatchcom.py
+index eb2d029..c7069c7 100644
+--- a/sites/brandwatchcom.py
++++ b/sites/brandwatchcom.py
+@@ -1,192 +1,14 @@
+-from DrissionPage import ChromiumPage, ChromiumOptions
+-from time import sleep
+-from DrissionPage.common import Keys
+-import json
+-import random
+-import os, datetime, pyautogui, requests
+-from lib.common import generate_email, generate_phone_number
+-from twocaptcha import TwoCaptcha
++from lib.broker_helpers import run_ccpa_email_optout
+ 
+-now = datetime.datetime.now()
+-current_date = now.strftime("%Y-%m-%d")
+-base_dir = os.getcwd()
+ 
+-screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
+-os.makedirs(screentShotDir, exist_ok=True)
+-usaStateDictionary = { 'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'District of Columbia': 'DC', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY' }
+-
+-def get_chromium_options(arguments: list) -> ChromiumOptions:
+-    """
+-    Configures and returns Chromium options.
+-    
+-    :param browser_path: Path to the Chromium browser executable.
+-    :param arguments: List of arguments for the Chromium browser.
+-    :return: Configured ChromiumOptions instance.
+-    """
+-    options = ChromiumOptions()
+-    # options.no_imgs(True)
+-    # options.no_imgs(True).mute(True).no_js(True)
+-    # options.set_argument('--auto-open-devtools-for-tabs', 'true') # we don't need this anymore
+-    for argument in arguments:
+-        options.set_argument(argument)
+-    return options
+-
+-def _human_type2(element , text: str) -> None:
+-    """
+-    Types in a way reminiscent of a human, with a random delay in between 50ms to 100ms for every character
+-    :param element: Input element to type text to
+-    :param text: Input to be typed
++def brandwatchcom(dataRow, website_name, in_user_email, run_mode):
++    """2026-10-04: the DPOrganizer portal this script drove
++    (portals.dporganizer.com/4d3f1506-...) now answers "This page is no
++    longer available" and brandwatch.com/p/legal-data/ redirects to it.
++    Brandwatch's own data-subject-request page says a request can be
++    initiated by e-mail to privacy@brandwatch.com, so that is the route now
++    (0/29 portal runs succeeded in the 24 Sep-2 Oct logs).
+     """
+-
+-    for c in text:
+-        element.input(c)
+-
+-        sleep(random.uniform(0.05, 0.1))
+-
+-def fill_input_data(page, dataRow) : 
+-    
+-    request_type = page.ele("tag:div@@data-test=portal-input-0")
+-    request_type.click()
+-
+-    react_select_input_2 = page.ele("tag:input@@id=react-select-2-input")
+-    print(react_select_input_2)
+-    _human_type2(react_select_input_2, "Erasure")
+-    react_select_input_2.input(Keys.ENTER)
+-
+-    name_input = page.ele("tag:input@@data-test=portal-input-1")
+-    name_input.click()
+-    print("typing the last name...")
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(name_input, dataRow["Name"])
+-
+-    email_input = page.ele("tag:input@@data-test=portal-input-2")
+-    email_input.click()
+-    print("typing the email...")
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(email_input, generate_email(dataRow["Name"]))
+-
+-    phone_input = page.ele("tag:input@@name=phone")
+-    phone_input.clear()
+-    phone_input.click()
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(phone_input, f"1{dataRow["Phone Number"]}")
+-
+-    country_select = page.ele("tag:div@@data-test=portal-input-4")
+-    country_select.click()
+-
+-    react_select_input_3 = page.ele("tag:input@@id=react-select-3-input")
+-    print(react_select_input_3)
+-    _human_type2(react_select_input_3, "United States")
+-    react_select_input_3.input(Keys.ENTER)
+-    
+-    relation_div = page.ele("tag:div@@data-test=portal-input-5")
+-    relation_div.click()
+-
+-    react_select_input_4 = page.ele("tag:input@@id=react-select-4-input")
+-    print(react_select_input_4)
+-    _human_type2(react_select_input_4, "Customer")
+-    react_select_input_4.input(Keys.ENTER)
+-
+-    page.actions.click()
+-
+-    sleep(random.uniform(1, 2))
+-
+-    while True :
+-        regenerate_btn = page.ele("tag:button@@text()=Regenerate captcha image")
+-        regenerate_btn.click()
+-        sleep(2)
+-
+-        api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+-        solver = TwoCaptcha(api_key)
+-        
+-        Image = page.ele("tag:img@@class=captcha__image")
+-        Image.get_screenshot(("captcha_%d.png" % __import__("threading").get_ident()))
+-
+-        # Captcha solver part
+-        print('Captcha is solving....')
+-        try:
+-            result = solver.normal(("captcha_%d.png" % __import__("threading").get_ident()))
+-        #   print(result)
+-            Code=result['code']
+-            print('Captcha is solve. Code:',Code)
+-
+-        except Exception as e:
+-            pass
+-
+-        #Input code
+-        code=page.ele('tag:input@@data-test=captchaInput')
+-        code.click()
+-        sleep(random.uniform(0.1,0.3))
+-        _human_type2(code,Code)
+-        # code.input(Keys.ENTER)
+-
+-        sleep(1)
+-        
+-        submit_button = page.ele("tag:button@@text()=Submit request")
+-        submit_button.click()
+-
+-        sleep(3)
+-
+-        error_msg = page.ele("tag:h4@@text()=Captcha error")
+-        if error_msg == None :
+-            break
+-       
+-            
+-        
+-def brandwatchcom(dataRow, website_name, in_user_email, run_mode) : 
+-    page = None
+-    try : 
+-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
+-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
+-
+-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
+-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+-        screenshot_save_path = screentShotDir + "\BrandwatchCom_" + fName + "-" + lName + ".png"
+-        
+-        arguments = [
+-            "-no-first-run",
+-            "--start-maximized",
+-            "-disable-javascript",
+-            "-disable-gpu",
+-            "-disable-sensors",
+-        ]
+-
+-        options = get_chromium_options(arguments).auto_port()
+-        if run_mode == "headless" :
+-            options.headless()
+-        #Launch Website
+-        page = ChromiumPage(addr_or_opts=options)
+-        page.get("https://www.brandwatch.com/p/legal-data/")
+-
+-        fill_input_data(page, dataRow)
+-
+-        sleep(random.uniform(0.5, 1))
+-
+-
+-        try :
+-            # response = requests.get(sucessConfirmationApi, timeout=10)
+-            print("Success Confirmation API is sent successfully!")
+-            sleep(5)
+-            page.get_screenshot(screenshot_save_path)
+-        except Exception as e:
+-            print("Success Confirmation API is failed: ", str(e))
+-        
+-    
+-    except Exception as e:
+-        try :
+-            # response = requests.get(errorConfirmationApi, timeout=10)
+-            print("Error Confirmation API is sent successfully!")
+-            sleep(5)
+-            page.get_screenshot(screenshot_save_path)
+-        except Exception as e:
+-            print("Error Confirmation API is failed: ", str(e))
+-        raise
+-
+-    finally:
+-        if page is not None:
+-            try:
+-                page.quit()
+-            except Exception:
+-                pass
+-
+-    return screenshot_save_path
+\ No newline at end of file
++    return run_ccpa_email_optout("brandwatchcom", dataRow,
++                                 privacy_email="privacy@brandwatch.com",
++                                 run_mode=run_mode)
+diff --git a/sites/bumpercom.py b/sites/bumpercom.py
+index d7dd965..02e0491 100644
+--- a/sites/bumpercom.py
++++ b/sites/bumpercom.py
+@@ -56,21 +56,28 @@ def fill_input_data(page, dataRow) :
+     fName = dataRow["Name"].split()[0] # split string based on space to get first name
+     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+ 
++    # 2026-10-04 survey: the request-type picker and the "Do you have an
++    # account?" question are now native <select>s (#requestType,
++    # #account_type_select); the MUI modal with the "Yes, I do" <h6> is gone,
++    # which is where all 26 runs died. We answer "No, I do not" (guest) —
++    # these customers are not members — and confirm the "continue with
++    # Delete?" dialog when it appears. Age is a new required field.
++    helpers = __import__("lib.broker_helpers", fromlist=["select_state", "missing_pii"])
++    form_container = page.ele("tag:form@@id=comprehensive-form", timeout=10)
++
++    request_type = form_container.ele("tag:select@@id=requestType")
++    request_type.select.by_value("rtd")
+     sleep(random.uniform(0.5, 1))
+-    div_modal = page.ele("tag:div@@class:MuiDialogContent-root")
+-    print(div_modal)
+-    yes_button = div_modal.ele("tag:h6@@text()=Yes, I do")
+-    yes_button.click()
+-    sleep(random.uniform(0.5, 1))
+-    continue_button = div_modal.ele("tag:button@@type=submit")
+-    continue_button.click()
+-    sleep(random.uniform(0.5, 1))
+ 
+-    form_container = page.ele("tag:form@@id=comprehensive-form")
+-    member_input = form_container.ele("tag:input@@placeholder=Membership ID")
+-    member_input.clear()
+-    member_input.click()
+-    _human_type2(member_input, "1")
++    account_type = form_container.ele("tag:select@@id=account_type_select", timeout=4)
++    if account_type:
++        account_type.select.by_value("guest")
++        sleep(random.uniform(0.5, 1))
++
++    yes_button = page.ele("tag:button@@aria-label=delete-information-yes-button", timeout=3)
++    if yes_button and yes_button.states.is_displayed:
++        yes_button.click()
++        sleep(random.uniform(0.5, 1))
+ 
+     first_name = form_container.ele("tag:input@@id=fname")
+     first_name.clear()
+@@ -87,6 +94,16 @@ def fill_input_data(page, dataRow) :
+     email_input.click()
+     _human_type2(email_input, generate_email(dataRow["Name"]))
+ 
++    age = str(dataRow.get("Age") or "").strip()
++    if not age and str(dataRow.get("Birth Year") or "").strip().isdigit():
++        age = str(datetime.date.today().year - int(dataRow["Birth Year"]))
++    age_input = form_container.ele("tag:input@@id=age", timeout=3)
++    if age_input:
++        if not age:
++            raise helpers.missing_pii("Age")
++        age_input.clear()
++        age_input.click()
++        _human_type2(age_input, age)
+ 
+     street_input = form_container.ele("tag:input@@id=street")
+     street_input.clear()
+@@ -98,13 +115,8 @@ def fill_input_data(page, dataRow) :
+     city_input.click()
+     _human_type2(city_input, dataRow["City"])
+ 
+-    state_input = form_container.ele("tag:input@@name=state")
+-    state_input.click()
+-    modal_container = page.ele("tag:div@@class:MuiPaper-root")
+-
+-    state_li = modal_container.ele(f"tag:li@@text()={__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"])}")
+-    
+-    state_li.click()
++    state_select = form_container.ele("tag:select@@id=state")
++    helpers.select_state(state_select, dataRow["State"])
+ 
+     zip_input = form_container.ele("tag:input@@id=zip")
+     zip_input.clear()
+@@ -153,27 +165,18 @@ def bumpercom(dataRow, website_name, in_user_email, run_mode) :
+         except Exception as e:
+             print(e)
+ 
+-        captchaResponse_element = page.ele("tag:input@@name=captchaResponse")
+-        page.run_js("arguments[0].value = arguments[1];", captchaResponse_element, Code)
+-
+-        sleep(0.3)
+-
+-        captcha_widget_div = page.ele("tag:div@@id=captcha-widget")
+-        print(captcha_widget_div)
+-        div_element = captcha_widget_div.children()[0]
+-        turnstile_response_element = div_element.ele("tag:input@@name=cf-turnstile-response")
+-        page.run_js("arguments[0].value = arguments[1];", turnstile_response_element, Code)
++        __import__("lib.broker_helpers", fromlist=["set_turnstile_response"]).set_turnstile_response(page, Code)
+ 
+         sleep(1)
+ 
+         form_container = page.ele("tag:form@@id=comprehensive-form")
+-        submit_button = form_container.ele("tag:button@@type=submit")
++        submit_button = form_container.ele("tag:button@@aria-label=continue-button", timeout=3) \
++            or form_container.ele("tag:button@@type=submit")
+         submit_button.click()
+-        sleep(random.uniform(0.5, 1))
+-        div_modal = page.ele("tag:div@@class:MuiPaper-root")
+-        yes_button = div_modal.ele("tag:button@@aria-label=delete-information-yes-button")
+-        print(yes_button)
+-        yes_button.click()
++        sleep(random.uniform(1, 2))
++        yes_button = page.ele("tag:button@@aria-label=delete-information-yes-button", timeout=4)
++        if yes_button and yes_button.states.is_displayed:
++            yes_button.click()
+ 
+         sleep(1)
+         
+diff --git a/sites/completemedicallistscom.py b/sites/completemedicallistscom.py
+index b555efd..064745d 100644
+--- a/sites/completemedicallistscom.py
++++ b/sites/completemedicallistscom.py
+@@ -74,6 +74,7 @@ def fill_input_data(page, dataRow) :
+     _human_type2(city_input, dataRow["City"])
+ 
+     state_input = page.ele("tag:input@@name=U3RhdGU=")
++    state_input.clear()   # 2026-10-04: field now pre-filled with "CA"
+     state_input.click()
+     sleep(random.uniform(0.1,0.5))
+     _human_type2(state_input, __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))    
+@@ -89,8 +90,15 @@ def fill_input_data(page, dataRow) :
+     sleep(random.uniform(0.1,0.5))
+     _human_type2(email_input, generate_email(dataRow["Name"]))    
+ 
+-    confirm_checkbox = page.ele("tag:input@@name=aHVtYW4=")
+-    confirm_checkbox.click()
++    # 2026-10-04 survey: the "human" checkbox (name=aHVtYW4=) is gone — the
++    # form now has reCAPTCHA plus five honeypot inputs (ERA/FIP/BABIP/OPS/
++    # SLG) that must stay EMPTY. Pick the "Remove" request radio instead.
++    remove_radio = page.ele("tag:input@@name=ins@@value=Remove", timeout=3)
++    if remove_radio:
++        remove_radio.click(by_js=True)
++    confirm_checkbox = page.ele("tag:input@@name=aHVtYW4=", timeout=1)
++    if confirm_checkbox:
++        confirm_checkbox.click()
+ 
+     
+ def completemedicallistscom(dataRow, website_name, in_user_email, run_mode) : 
+@@ -156,16 +164,18 @@ def completemedicallistscom(dataRow, website_name, in_user_email, run_mode) :
+ 
+         sleep(1)
+ 
+-        signature_input = page.ele("tag:input@@name=Signature")
+-        signature_input.click()
+-        sleep(random.uniform(0.1,0.5))
+-        _human_type2(signature_input, dataRow["Name"])    
+-
+-        human_checkbox = page.ele("tag:input@@name=human")
+-        human_checkbox.click()
+-
+-        submit_button1 = page.ele("tag:input@@value=Submit")
+-        submit_button1.click()
++        # Second "signature" step: present on the old flow, absent in the
++        # 2026-10-04 capture. Do it only if the page shows it.
++        signature_input = page.ele("tag:input@@name=Signature", timeout=4)
++        if signature_input:
++            signature_input.click()
++            sleep(random.uniform(0.1,0.5))
++            _human_type2(signature_input, dataRow["Name"])
++            human_checkbox = page.ele("tag:input@@name=human", timeout=2)
++            if human_checkbox:
++                human_checkbox.click()
++            submit_button1 = page.ele("tag:input@@value=Submit")
++            submit_button1.click()
+ 
+         try :
+             # response = requests.get(sucessConfirmationApi, timeout=10)
+diff --git a/sites/contactoutcom.py b/sites/contactoutcom.py
+index f9dd63a..7dcfa12 100644
+--- a/sites/contactoutcom.py
++++ b/sites/contactoutcom.py
+@@ -51,29 +51,17 @@ def make_standard_num(num) :
+     return ret
+ 
+ def fill_input_data(page, dataRow) : 
+-    
+-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
+-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+-
+-    fullName_input = page.ele("tag:input@@name=name")
+-    fullName_input.click()
+-    print("typing the full name...")
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(fullName_input, dataRow["Name"])
+-
++    # 2026-10-04 survey: /optout is now a single e-mail box guarded by
++    # Cloudflare Turnstile; ContactOut e-mails a verification link and deletes
++    # the profile once it is clicked. The old name/profile_url boxes are gone
++    # (0/28 runs got past them).
+     email_str = generate_email(dataRow["Name"])
+-    email_input = page.ele("tag:input@@name=email")
++    email_input = page.ele("tag:input@@id=email", timeout=8) or page.ele("tag:input@@name=email")
+     email_input.click()
+     print("typing the email...")
+     sleep(random.uniform(0.1,0.5))
+     _human_type2(email_input, email_str)
+-
+-    url_str = "https://contactout.com/" + fName + "-" + lName
+-    url_input = page.ele("tag:input@@name=profile_url")
+-    url_input.click()
+-    print("typing the url...")
+-    sleep(random.uniform(0.1,0.5))
+-    _human_type2(url_input, url_str)
++    return email_str
+ 
+     
+ def contactoutcom(dataRow, website_name, in_user_email, run_mode) : 
+@@ -106,28 +94,28 @@ def contactoutcom(dataRow, website_name, in_user_email, run_mode) :
+ 
+         sleep(random.uniform(1, 2))       
+ 
+-        fill_input_data(page, dataRow)
++        email_str = fill_input_data(page, dataRow)
+ 
+         apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
+         solver = TwoCaptcha(apiKey)
+-        print("Captcha is solving...")
+-        try :
+-            site_key = "6LcHQhQUAAAAAPP2SaMKDQJ5IhkNdh6wIwIZZqzF"
+-            site_url = page.url
+-            result = solver.recaptcha(site_key, site_url)
+-            print("Captcha is solved.")
+-            print(result["code"])
+-            Code = result["code"]
+-        except Exception as e:
+-            pass
+-
+-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
+-        textarea_token.set.innerHTML(Code)
+-
++        print("Turnstile is solving...")
++        result = solver.turnstile(sitekey="0x4AAAAAACEI83yYiz9fKLVM", url="https://contactout.com/optout")
++        Code = result["code"]
++        __import__("lib.broker_helpers", fromlist=["set_turnstile_response"]).set_turnstile_response(page, Code)
+         sleep(1)
+-        
+-        submit_button = page.ele("tag:button@@text()=Submit")
++
++        submit_button = page.ele("tag:button@@text():Send verification link", timeout=3) \
++            or page.ele("tag:button@@type=submit")
+         submit_button.click()
++        sleep(5)
++        page.get_screenshot(screenshot_save_path)
++
++        # The removal only happens when the link in their e-mail is opened.
++        from lib.email_verification import do_email_verification
++        try:
++            do_email_verification("contactout", screenshot_save_path)
++        except Exception as e:
++            raise RuntimeError("contactoutcom: verification link sent to %s but not confirmed: %s" % (email_str, e))
+ 
+ 
+         try :
+diff --git a/sites/demystcom.py b/sites/demystcom.py
+index a6d3e03..a0fde23 100644
+--- a/sites/demystcom.py
++++ b/sites/demystcom.py
+@@ -135,15 +135,20 @@ def demystcom(dataRow, website_name, in_user_email, run_mode) :
+ 
+         fill_input_data(page, dataRow)
+ 
++        # 2026-10-04: the reCAPTCHA widget (react-google-recaptcha, key
++        # 6Lcfo1oa...) is only mounted AFTER the first Submit click. The old
++        # flow refreshed the page right after that click, which unmounted it
++        # again, so 24/27 runs waited for an iframe that never came back.
+         submit_button = page.ele("tag:button@@text()=Submit")
+         submit_button.click()
+-
+-        page.refresh()
+-        sleep(1)
+-
+-        fill_input_data(page, dataRow)
+-
+-        page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA")
++        sleep(2)
++        if not page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA", timeout=12):
++            helpers = __import__("lib.broker_helpers", fromlist=["wait_text"])
++            if helpers.wait_text(page, ["Your form has been sent successfully"], timeout=5):
++                sleep(2)
++                page.get_screenshot(screenshot_save_path)
++                return screenshot_save_path
++            raise RuntimeError("demystcom: no captcha and no success message after Submit")
+         sleep(1)
+         iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
+         rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
+@@ -188,6 +193,11 @@ def demystcom(dataRow, website_name, in_user_email, run_mode) :
+         submit_button = page.ele("tag:button@@text()=Submit")
+         submit_button.click()
+ 
++        helpers = __import__("lib.broker_helpers", fromlist=["wait_text"])
++        if not helpers.wait_text(page, ["Your form has been sent successfully"], timeout=15):
++            page.get_screenshot(screenshot_save_path)
++            raise RuntimeError("demystcom: form did not confirm after captcha + Submit")
++
+         try :
+             # response = requests.get(sucessConfirmationApi, timeout=10)
+             print("Success Confirmation API is sent successfully!")
+diff --git a/sites/faradayio.py b/sites/faradayio.py
+index 546e6de..bec642d 100644
+--- a/sites/faradayio.py
++++ b/sites/faradayio.py
+@@ -46,12 +46,19 @@ def faradayio(dataRow, website_name, in_user_email, run_mode):
+         _ENTRIES["type"]: "Data Deletion",
+         _ENTRIES["who"]: "Consumer",
+     }
+-    for key, field in (("dob", dob),
+-                       ("address", dataRow.get("Address") or ""),
++    for key, field in (("address", dataRow.get("Address") or ""),
+                        ("city", dataRow.get("City") or ""),
+                        ("state", dataRow.get("State") or "")):
+         if field:
+             payload[_ENTRIES[key]] = field
++    # 2026-10-04: a Google Forms date question is posted as three fields
++    # (entry.N_year / _month / _day, confirmed on the live form). Sending one
++    # "M/D/YYYY" string under entry.N is what produced HTTP 400 on all 26
++    # runs that had a birth date.
++    if dob:
++        payload[_ENTRIES["dob"] + "_year"] = str(dataRow["Birth Year"])
++        payload[_ENTRIES["dob"] + "_month"] = str(int(dataRow["Birth Month"]))
++        payload[_ENTRIES["dob"] + "_day"] = str(int(dataRow["Birth Day"]))
+ 
+     log_step(broker, "POST google form (data deletion) for %s %s" % (first, last))
+     resp = requests.post(_URL, data=payload, timeout=30, headers={
+diff --git a/sites/findpeoplesearchcom.py b/sites/findpeoplesearchcom.py
+index 52f5321..93259bd 100644
+--- a/sites/findpeoplesearchcom.py
++++ b/sites/findpeoplesearchcom.py
+@@ -78,6 +78,9 @@ def fill_input_data(page, dataRow) :
+     _human_type2(comment_textarea, "...")
+ 
+ def findpeoplesearchcom(dataRow, website_name, in_user_email, run_mode) : 
++    # 2026-10-04: NotImplementedError -> manage.py parks the row as step 4
++    # ("no automation") instead of retrying a dead site every day.
++    raise NotImplementedError("findpeoplesearchcom: findpeoplesearch.com now redirects to a SearchHounds ad page (captured 2026-10-04); the opt-out page and the site are gone")
+     page = None
+     try : 
+         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
+diff --git a/sites/fmadatacom.py b/sites/fmadatacom.py
+index 59bdeb6..561bc93 100644
+--- a/sites/fmadatacom.py
++++ b/sites/fmadatacom.py
+@@ -115,30 +115,21 @@ def fmadatacom(dataRow, website_name, in_user_email, run_mode) :
+ 
+         fill_input_data(page, dataRow)
+ 
++        # 2026-10-04 survey: fmadata switched from reCAPTCHA to hCaptcha
++        # (sitekey 1a8ac6e2-0f6c-4e30-b338-e29297cec7b0). 28/31 runs died
++        # looking for the reCAPTCHA iframe.
+         apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
+         solver = TwoCaptcha(apiKey)
+-        print("Captcha is solving...")
+-        try :
+-            site_key = "6Leq_cwZAAAAACojZ2YS50R7-RzjBVkOMhWs3aEO"
+-            site_url = "https://www.fmadata.com/opt-out-requests/new"
+-            result = solver.recaptcha(site_key, site_url)
+-            print("Captcha is solved.")
+-            print(result["code"])
+-            Code = result["code"]
+-        except Exception as e:
+-            print("Error: ", str(e))
+-
+-
+-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
+-        recaptcha_input_token = iframe_container.ele("tag:input@@id=recaptcha-token")
+-        recaptcha_input_token.set.attr("value", Code)
+-
+-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
+-        textarea_token.set.innerHTML(Code)
+-
+-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
+-        recaptcha_input_token1 = iframe_container1.ele("tag:input@@id=recaptcha-token")
+-        recaptcha_input_token1.set.attr("value", Code)
++        print("hCaptcha is solving...")
++        site_key = "1a8ac6e2-0f6c-4e30-b338-e29297cec7b0"
++        site_url = "https://www.fmadata.com/opt-out-requests/new"
++        result = solver.hcaptcha(sitekey=site_key, url=site_url)
++        Code = result["code"]
++        page.run_js(
++            "var t=arguments[0];"
++            "document.querySelectorAll(\"textarea[name='h-captcha-response'],textarea[name='g-recaptcha-response']\")"
++            ".forEach(function(e){e.style.display='block';e.value=t;});", Code)
++        sleep(1)
+ 
+         submit_button = page.ele("tag:input@@type=submit")
+         submit_button.click()
+-- 
+2.43.0
+

@@ -613,15 +613,22 @@ def _submit_arrests_contact_form(page, broker_name, base, dataRow):
     and their address. Returns True when the form was filled and submitted.
     """
     try:
-        page.get(base + "/contact-form")
-        time.sleep(2.5)
-        try:
-            dismiss_common_consents(page, broker_name)
-        except Exception:
-            pass
-        name_el = page.ele("css:input[name='your-name']", timeout=4)
-        mail_el = page.ele("css:input[name='your-email']", timeout=2)
-        msg_el = page.ele("css:textarea[name='your-message']", timeout=2)
+        # 2026-10-04: ohioarrests.org serves the same Contact Form 7 at
+        # /corrections ("Report an Error or Correction") and /request-portal
+        # redirects there; /contact-form on that build has no form.
+        name_el = mail_el = msg_el = None
+        for path in ("/contact-form", "/corrections"):
+            page.get(base + path)
+            time.sleep(2.5)
+            try:
+                dismiss_common_consents(page, broker_name)
+            except Exception:
+                pass
+            name_el = page.ele("css:input[name='your-name']", timeout=4)
+            mail_el = page.ele("css:input[name='your-email']", timeout=2)
+            msg_el = page.ele("css:textarea[name='your-message']", timeout=2)
+            if name_el and mail_el and msg_el:
+                break
         if not (name_el and mail_el and msg_el):
             log_step(broker_name, "contact form not present either", logging.WARNING)
             return False
@@ -733,6 +740,24 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
                 if _has_form():
                     found = True
                     break
+            if not found and broker_name.endswith("courtrecordsus"):
+                # 2026-10-04 survey: the state *courtrecords.us sites have no
+                # portal of their own (arkansascourtrecords.us/request-portal
+                # and /optout/ both 404); their privacy page sends consumers
+                # to the network-wide page, behind an "I Agree" FCRA gate.
+                url = "https://courtrecords.us/optout/"
+                log_step(broker_name, "GET " + url)
+                page.get(url)
+                sleep(2.5)
+                try:
+                    agree = page.ele("xpath://button[contains(.,'I Agree')] | //a[contains(.,'I Agree')]", timeout=3)
+                    if agree:
+                        agree.click()
+                        sleep(2.5)
+                except Exception:
+                    pass
+                if _has_form():
+                    found = True
             if not found:
                 # 2026-09-24: the *arrests.org name covers TWO platforms. Only
                 # some (indianaarrests.org) run the WPForms portal; the rest
@@ -1203,3 +1228,98 @@ def ccpa_global_quota_reached():
     if state.get("date") != today:
         return False  # stale file: counter will reset on next increment
     return int(state.get("counts", {}).get("_global", 0)) >= CCPA_TOTAL_PER_DAY
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-04 (capture_forms survey of the 22 worst brokers)
+# ---------------------------------------------------------------------------
+
+def select_onetrust_autocomplete(container, input_id, candidates, timeout=3):
+    """Pick an option in a OneTrust <vt-autocomplete> field (country, state).
+
+    Clicks the input, types the candidate so the list is filtered, then
+    clicks the matching <vt-option>. Tries each candidate in turn and fails
+    with the list it tried. Returns True when a click landed."""
+    from time import sleep
+    inp = container.ele("tag:input@@id=" + input_id, timeout=timeout)
+    if not inp:
+        raise RuntimeError("OneTrust field %s not on this form" % input_id)
+    tried = []
+    for c in candidates:
+        if not c or c in tried:
+            continue
+        tried.append(c)
+        try:
+            inp.click()
+            inp.clear()
+            inp.input(c)
+            sleep(0.8)
+        except Exception:
+            pass
+        for sel in ("tag:vt-option@@aria-label=" + c,
+                    "tag:vt-option@@text()= " + c + " ",
+                    "tag:vt-option@@text():" + c):
+            try:
+                opt = container.ele(sel, timeout=1.5)
+            except Exception:
+                opt = None
+            if opt:
+                opt.click()
+                sleep(0.4)
+                return True
+    raise RuntimeError("no option matched for %s; tried %r" % (input_id, tried))
+
+
+def select_onetrust_country(container, country="United States"):
+    """OneTrust DSAR forms (acxiom, affinitysolutions) now put a required
+    Country autocomplete before State, and the State list stays empty until a
+    country is chosen. 81 + 90 state-selection failures in the 24 Sep-2 Oct
+    logs were this."""
+    return select_onetrust_autocomplete(
+        container, "countryDSARElement",
+        [country, "United States of America", "USA", "US"])
+
+
+def solve_image_captcha_element(page, img_ele, broker):
+    """Screenshot an <img> captcha and return the text 2captcha reads from it
+    (BotDetect on OneTrust forms, legacy image captchas elsewhere)."""
+    import os
+    import threading
+    from lib.captcha import get_solver
+    path = os.path.abspath("captcha_%s_%d.png" % (broker, threading.get_ident()))
+    img_ele.get_screenshot(path)
+    try:
+        result = get_solver().normal(path)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    code = (result or {}).get("code") if isinstance(result, dict) else None
+    if not code:
+        raise RuntimeError(broker + ": image captcha could not be solved")
+    return code
+
+
+def set_turnstile_response(page, token):
+    """Write a solved Cloudflare Turnstile token into every
+    cf-turnstile-response input on the page (sites render one per widget,
+    sometimes two for the same widget)."""
+    page.run_js(
+        "var t=arguments[0];"
+        "document.querySelectorAll(\"input[name='cf-turnstile-response'],"
+        "textarea[name='cf-turnstile-response']\")"
+        ".forEach(function(e){e.value=t;});", token)
+
+
+def wait_text(page, needles, timeout=10):
+    """Return the first needle that appears in page.html within timeout."""
+    from time import sleep, time
+    end = time() + timeout
+    while time() < end:
+        html = page.html or ""
+        for n in needles:
+            if n in html:
+                return n
+        sleep(0.5)
+    return None

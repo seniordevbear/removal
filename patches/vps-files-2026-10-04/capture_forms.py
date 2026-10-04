@@ -49,6 +49,21 @@ TARGETS = {
 }
 
 
+# Round 2 (2026-10-04): pages Cloudflare or JS hide from the web server.
+#     Scripts\python.exe capture_forms.py round2
+ROUND2 = {
+    "allpeoplecom-removal": "https://allpeople.com/removal",
+    "advancedbackgroundcheckscom-optout": "https://www.advancedbackgroundchecks.com/opt-out",
+    "advancedbackgroundcheckscom-dns": "https://www.advancedbackgroundchecks.com/do-not-sell",
+    "alescodatacom-privacycenter": "https://alescodata.com/privacy-center/",
+    "brandwatchcom-dsar": "https://www.brandwatch.com/legal/data-subject-access-request/",
+    "courtrecordsus-optout": "https://courtrecords.us/optout/",
+    "acbjcom-privacy": "https://www.acbj.com/privacy",
+    "bizjournalscom-privacy": "https://www.bizjournals.com/privacy",
+    "ohioarrestsorg-contact": "https://www.ohioarrests.org/contact-form",
+}
+
+
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
     print(line, flush=True)
@@ -73,7 +88,8 @@ def main():
     log("browser open")
 
     ok = fail = 0
-    for broker, url in TARGETS.items():
+    targets = ROUND2 if (len(sys.argv) > 1 and sys.argv[1] == "round2") else TARGETS
+    for broker, url in targets.items():
         try:
             page.get(url, timeout=30)
             time.sleep(6)

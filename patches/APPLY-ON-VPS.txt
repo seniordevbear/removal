@@ -1,39 +1,23 @@
-PrivacyDuck removal pipeline — update bundle 2026-10-03
-Replaces the 2026-10-02 bundle (its fix is included here as patch 0004).
+VPS update bundle  (built 2026-10-04 from commit 65cb32e)
+=========================================================
 
-WHAT IS IN IT (6 commits, oldest first):
-  0001  shared scan runner, profile URL in CCPA emails
-  0002  signed authorization attached to CCPA emails, daily log files
-  0003  OneTrust state option matching (fixes acxiom / affinitysolutions "state option not found")
-  0004  unique screenshot filenames (stops cross-filing between customers); arrests.org rejected forms no longer count as removed
-  0005  immediate retry on transient page errors; quarantine of brokers with no success in 7 days;
-        successes logged; DB connect retry; scan rows without a name -> "needs data" instead of crash
-  0006  capture_forms.py added to the repo (see bottom)
+What changed since the VPS was last updated: 54 files.
+  manage.py, __removal.py, __scan.py, __scanGoogle.py, capture_forms.py,
+  lib/broker_helpers.py, 42 x sites/*.py, 6 x sites_scan/*.py
+No file needs deleting. .env is NOT in the bundle - keep the VPS copy.
 
-OPTION A (keeps git history) — in PowerShell on the VPS:
-  cd C:\wonderful\removal
-  git am 0001-*.patch 0002-*.patch 0003-*.patch 0004-*.patch 0005-*.patch 0006-*.patch
-  (if "git am" complains, run: git am --abort, then use option B)
+Option A - git (if C:\wonderful\removal is a git checkout):
+    cd C:\wonderful\removal
+    git am patches\0001-*.patch ... patches\0012-*.patch
 
-OPTION B (copy files) — overwrite these four files, nothing else:
-  files\manage.py            -> C:\wonderful\removal\manage.py
-  files\__scan.py            -> C:\wonderful\removal\__scan.py
-  files\__scanGoogle.py      -> C:\wonderful\removal\__scanGoogle.py
-  files\lib\broker_helpers.py-> C:\wonderful\removal\lib\broker_helpers.py
-  Do NOT touch .env.
+Option B - copy (works everywhere):
+    stop manage.py (Ctrl+C)
+    unpack vps-files-2026-10-04.tar.gz over C:\wonderful\removal   (overwrite)
+    Scripts\python.exe manage.py
 
-THEN: stop manage.py and start it again.
-
-OPTIONAL .env knobs (defaults in brackets):
-  REMOVAL_TRANSIENT_RETRIES=1    extra immediate attempts on page-timing errors [1]
-  DEAD_DOMAIN_FAILS=3            failures in 7 days with no success before a broker is held back [3]
-
-CHECK AFTER RESTART (first few minutes of the new daily log):
-  - lines like "step 2 -> id=... reason=-"           (successes now logged)
-  - lines like "transient ElementNotFoundError on ... retrying (1/1)"
-  - one line "quarantined brokers (no success in 7d): N ..."
-  - screenshot names now look like 143012_123456_worker0_ab12cd_after_submit.png
-
-TO LET ME REPAIR THE BROKEN BROKER SCRIPTS (optional, ~5 min):
-  (capture_forms.py arrives with patch 0006)  run:  python capture_forms.py
-  then zip the capture_forms folder and upload it to /root/privacyduck/ on the web server.
+Then, when convenient (5 minutes, no customer data):
+    Scripts\python.exe capture_forms.py round2
+    -> zip C:\wonderful\removal\capture_forms and upload to /root/privacyduck/
+    (9 pages the web server cannot fetch: allpeople /removal,
+     advancedbackgroundchecks /opt-out, alesco HubSpot form, brandwatch
+     DSAR form, courtrecords.us/optout, acbj/bizjournals privacy pages)

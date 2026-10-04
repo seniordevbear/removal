@@ -1,0 +1,162 @@
+From 36fa98c41c7c5480ed98587931608e292d4d81a3 Mon Sep 17 00:00:00 2001
+From: max994-dev <bmax994@outlook.com>
+Date: Sun, 4 Oct 2026 02:34:50 +0000
+Subject: [PATCH 13/13] run_one.py: run a single broker for a single customer
+ on demand; Street falls back to Address; demyst postal code
+
+run_one.py <user_id> <broker> [--address ... --city ... --state ... --zip ... --save]
+drives the normal removal_dispatch path for one row, claims it so manage.py
+cannot collide, uploads the screenshot to the customer's evidence and sets the
+step like the main loop. Needed to produce one customer's oregonarrest.org
+submission while they wait, instead of hours in the fair-share queue.
+
+__removal.py: the PHP seeders never write data.street, so dataRow[Street] was
+empty for every customer; it now falls back to the address.
+demystcom.py: postal code was filled from Area Code, now from Zipcode.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ __removal.py       |   5 ++-
+ run_one.py         | 100 +++++++++++++++++++++++++++++++++++++++++++++
+ sites/demystcom.py |   2 +-
+ 3 files changed, 105 insertions(+), 2 deletions(-)
+ create mode 100644 run_one.py
+
+diff --git a/__removal.py b/__removal.py
+index 293c480..ae9ff63 100644
+--- a/__removal.py
++++ b/__removal.py
+@@ -70,7 +70,10 @@ def _build_data_row(email, firstname, lastname, city, zip, state, age,
+         "Address": address or "",
+         "Area Code": area_code or "",
+         "Phone Number": phone or "",
+-        "Street": street or "",
++        # 2026-10-04: the PHP seeders never write data->'$.street', so Street
++        # was "" for every customer and brokers that read dataRow["Street"]
++        # (beenverified, bumper, demyst, affinitysolutions) typed nothing.
++        "Street": street or address or "",
+         "Apartment": "",
+         "City": city or "",
+         "State": state or "",
+diff --git a/run_one.py b/run_one.py
+new file mode 100644
+index 0000000..fa70628
+--- /dev/null
++++ b/run_one.py
+@@ -0,0 +1,100 @@
++r"""
++run_one.py -- run ONE broker for ONE customer right now, on the VPS.
++
++    Scripts\python.exe run_one.py <user_id> <broker>
++    Scripts\python.exe run_one.py 1808 oregonarrestorg
++    Scripts\python.exe run_one.py 1808 oregonarrestorg --address "10225 SW Redwing Ter" --city Beaverton --state OR --zip 97007 --save
++
++Uses the same code path as manage.py (removal_dispatch -> sites/<broker>.py),
++so the result is a real submission with a real screenshot, uploaded to the
++customer's evidence like any other removal. Useful when a customer or the
++owner is waiting on one specific site and the queue would take hours.
++
++--address/--city/--state/--zip override the row's stored profile for this
++run; add --save to also write them into the customer's removal rows.
++--dry-run prints what would be sent and exits.
++
++manage.py can keep running; the row is claimed (step 1) first so the two
++cannot collide.
++"""
++import argparse
++import json
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++import manage  # noqa: E402  (loads .env, DB config, dispatch, upload)
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("user_id", type=int)
++    ap.add_argument("broker")
++    for f in ("address", "city", "state", "zip", "phone"):
++        ap.add_argument("--" + f)
++    ap.add_argument("--save", action="store_true", help="persist the overrides into the customer's removal rows")
++    ap.add_argument("--dry-run", action="store_true")
++    a = ap.parse_args()
++
++    conn = manage._db_connect()
++    cur = conn.cursor(dictionary=True)
++    cur.execute(
++        "SELECT id, user_id, target_domain, step, site_url, data FROM results "
++        "WHERE user_id = %s AND target_domain = %s AND kind = 1 ORDER BY id LIMIT 1",
++        (a.user_id, a.broker))
++    row = cur.fetchone()
++    if not row:
++        print("no kind=1 row for user %s / %s" % (a.user_id, a.broker)); return 2
++    d = json.loads(row["data"] or "{}")
++    overrides = {k: getattr(a, k) for k in ("address", "city", "state", "zip", "phone") if getattr(a, k)}
++    d.update(overrides)
++    if overrides and "street" not in overrides and "address" in overrides:
++        d["street"] = overrides["address"]
++
++    shown = {k: d.get(k) for k in ("firstname", "lastname", "address", "city", "state", "zip", "phone", "birth_year")}
++    print("row id=%s step=%s broker=%s" % (row["id"], row["step"], row["target_domain"]))
++    print("profile sent:", json.dumps(shown))
++    if a.dry_run:
++        return 0
++
++    if overrides and a.save:
++        sets = ", ".join("'$.%s', %%s" % k for k in list(overrides) + (["street"] if "address" in overrides else []))
++        vals = list(overrides.values()) + ([overrides["address"]] if "address" in overrides else [])
++        cur.execute("UPDATE results SET data = JSON_SET(data, " + sets + ") WHERE user_id = %s AND kind = 1",
++                    tuple(vals) + (a.user_id,))
++        conn.commit()
++        print("saved overrides into %d removal rows" % cur.rowcount)
++
++    manage._set_step(conn, row["id"], 1, "run_one claim")
++    try:
++        path = manage.removal_dispatch(
++            manage.socketio, row["target_domain"], row["site_url"],
++            row["id"], row["user_id"],
++            d.get("email"), d.get("firstname"), d.get("lastname"),
++            d.get("city"), d.get("zip"), d.get("state"), d.get("age"),
++            d.get("address"), d.get("phone"),
++            d.get("birth_day"), d.get("birth_month"), d.get("birth_year"),
++            d.get("area_code"), d.get("street") or d.get("address"), d.get("county"),
++        )
++    except Exception as e:
++        manage._set_step(conn, row["id"], 3, "run_one: %s: %s" % (type(e).__name__, e))
++        print("FAILED:", type(e).__name__, e)
++        raise
++
++    manage._set_step(conn, row["id"], 2)
++    cur.execute("UPDATE results SET last_removed_at = NOW() WHERE id = %s", (row["id"],))
++    conn.commit()
++    print("screenshot:", path)
++    if path and os.path.exists(path):
++        res = manage.upload_file_to_server(
++            manage.REMOVAL_UPLOAD_URL_TEMPLATE.format(domain=row["target_domain"], user_id=row["user_id"]), path)
++        print("uploaded to customer evidence:", "ok" if res else "FAILED (file kept locally)")
++    else:
++        print("broker returned no screenshot file")
++    cur.close(); conn.close()
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/sites/demystcom.py b/sites/demystcom.py
+index a0fde23..ee3ceea 100644
+--- a/sites/demystcom.py
++++ b/sites/demystcom.py
+@@ -76,7 +76,7 @@ def fill_input_data(page, dataRow) :
+     postal_input = page.ele("tag:input@@name=Postal code")
+     postal_input.click()
+     sleep(random.uniform(0.1,0.5))
+-    _human_type2(postal_input, str(dataRow["Area Code"]))
++    _human_type2(postal_input, str(dataRow["Zipcode"]))  # 2026-10-04: was Area Code
+     
+     
+     state_element = page.ele("tag:select@@name=State")
+-- 
+2.43.0
+

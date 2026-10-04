@@ -2,18 +2,24 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 from time import sleep
 import json
 import random
-import os, datetime, pyautogui, requests
+import os, datetime, pyautogui, requests, sys
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
+from lib.email_verification import do_email_verification
 from cloudsolver.extension import proxies
-from lib.broker_helpers import select_onetrust_state
 
+
+api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
+solver = TwoCaptcha(api_key)
+print(solver.balance)
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
 base_dir = os.getcwd()
 
 screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
+
 os.makedirs(screentShotDir, exist_ok=True)
+
 
 def get_chromium_options(arguments: list) -> ChromiumOptions:
     """
@@ -50,90 +56,72 @@ def make_standard_num(num) :
     return ret
 
 def fill_input_data(page, dataRow) : 
-    
+
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
-    sleep(1)
+    sleep(2)
 
-    page.wait.ele_displayed("tag:span@@text()= Myself ")
-    request_man = page.ele("tag:span@@text()= Myself ")
+    request_man = page.ele("tag:input@@id=subjectTypesDSARElement")
     request_man.click()
+    sleep(random.uniform(0.1,0.5))
+    page.ele("tag:vt-option@@aria-label=California Resident").click()
 
-    request_type = page.ele("tag:span@@text()= Delete My Information ")
+    request_type = page.ele("tag:span@@text()= Right to Delete ")
     request_type.click()
-
-    address_input = page.ele("tag:input@@id=addressDSARElement")
-    address_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Street"])
-
-    city_input = page.ele("tag:input@@id=cityDSARElement")
-    city_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(city_input, dataRow["City"])
-
-    state_select = page.ele("tag:input@@id=stateDSARElement")
-    state_select.click()
-    sleep(random.uniform(0.1,0.5))
-    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
-
-    zip_input = page.ele("tag:input@@id=zipDSARElement")
-    zip_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))    
-
+ 
     fName_input = page.ele("tag:input@@id=firstNameDSARElement")
     fName_input.click()
     print("typing the first name...")
     sleep(random.uniform(0.1,0.5))
     _human_type2(fName_input, fName)
 
-
     lName_input = page.ele("tag:input@@id=lastNameDSARElement")
     lName_input.click()
     print("typing the last name...")
     sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)    
+    _human_type2(lName_input, lName)
 
-    
+    email_str = generate_email(dataRow["Name"])
     email_input = page.ele("tag:input@@id=emailDSARElement")
     email_input.click()
     print("typing the email...")
     sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
+    _human_type2(email_input, email_str)
 
-    phone_input = page.ele("tag:input@@id=phoneNumberDSARElement")
-    phone_input.click()
-    print("typing the email...")
+    brand_element = page.ele("tag:input@@id=formField19DSARElement")
+    brand_element.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, dataRow["Phone Number"])
-
-    birth_date = make_standard_num(dataRow["Birth Month"]) + "/" + make_standard_num(dataRow["Birth Day"]) + "/" + make_standard_num(dataRow["Birth Year"])
-    birth_input = page.ele("tag:input@@id=dateOfBirthDSARElement")
-    birth_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(birth_input, birth_date)
-
+    page.ele("tag:vt-option@@aria-label=The Business Journals").click()
     
+    address_input = page.ele("tag:input@@id=addressDSARElement")
+    address_input.click()
+    sleep(random.uniform(0.1,0.5))
+    _human_type2(address_input, dataRow["Address"])
 
-def affinitysolutionscom(dataRow, website_name, in_user_email, run_mode) : 
+    city_input = page.ele("tag:input@@id=cityDSARElement")
+    city_input.click()
+    sleep(random.uniform(0.1,0.5))
+    _human_type2(city_input, dataRow["City"])
+
+    zip_input = page.ele("tag:input@@id=zipDSARElement")
+    zip_input.click()
+    sleep(random.uniform(0.1,0.5))
+    _human_type2(zip_input, str(dataRow["Zipcode"]))
+
+def acbjcom(dataRow, website_name, in_user_email, run_mode) : 
+    # 2026-10-04: NotImplementedError -> manage.py parks the row as step 4
+    # ("no automation") instead of retrying a dead site every day.
+    raise NotImplementedError("acbjcom: ACBJ's OneTrust webform 161633e1-.../a87fe61a-... returns 'The requested content is no longer available' (captured 2026-10-04) and acbj.com blocks server fetches; needs a browser survey for the new privacy-request link")
     page = None
+    
     try : 
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
         errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
+
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-
-        screenshot_save_path = screentShotDir + "\AffinitySolutionsCom_" + fName + "-" + lName + ".png"
-        
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
+        screenshot_save_path = screentShotDir + "\AcbjCom_" + fName + "-" + lName + ".png"
 
         port_arr = [
             "10001",
@@ -150,33 +138,30 @@ def affinitysolutionscom(dataRow, website_name, in_user_email, run_mode) :
 
         random_number = random.randint(0, 9)
 
-        
-        #Launch Website
         username = os.getenv("SMARTPROXY_USER", "")
         password = os.getenv("SMARTPROXY_PASSWORD", "")
         endpoint = os.getenv("SMARTPROXY_ENDPOINT", "isp.smartproxy.com")
         port = port_arr[random_number]
 
+        proxies(username, password, endpoint, port)
 
-        print(endpoint + ":" + port)
-        proxy_extension = proxies(username, password, endpoint, port)
-
-        options = get_chromium_options(arguments).auto_port().add_extension("extension")
-
+        options = ChromiumOptions().auto_port().add_extension("extension")
         if run_mode == "headless" :
             options.headless()
         
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        page.get("https://affinitysolutions-privacy.my.onetrust.com/webform/a564cfa1-53bf-4c10-bf95-cd907432d7e8/7e4e6bf3-6562-454e-8c73-6a7bd1f4b336")
+        
+        page.get("https://privacyportal.onetrust.com/webform/161633e1-9ffa-4774-8e22-ae77c29e0c70/a87fe61a-39f8-4b0a-a43f-779d6774c3c5")
 
-        sleep(random.uniform(1, 2))
+        sleep(1)
 
         fill_input_data(page, dataRow)
 
+        sleep(1)
+
         page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA")
         sleep(1)
-        
         iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
         rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
         print(rc_anchor_container)
@@ -216,10 +201,9 @@ def affinitysolutionscom(dataRow, website_name, in_user_email, run_mode) :
         verify_btn.click()
 
         sleep(5)
-
+        
         submit_button = page.ele("tag:button@@id=dsar-webform-submit-button")
         submit_button.click()
-
         
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)
@@ -229,6 +213,7 @@ def affinitysolutionscom(dataRow, website_name, in_user_email, run_mode) :
         except Exception as e:
             print("Success Confirmation API is failed: ", str(e))
         
+    
     except Exception as e:
         try :
             # response = requests.get(errorConfirmationApi, timeout=10)
@@ -247,3 +232,4 @@ def affinitysolutionscom(dataRow, website_name, in_user_email, run_mode) :
                 pass
 
     return screenshot_save_path
+    
