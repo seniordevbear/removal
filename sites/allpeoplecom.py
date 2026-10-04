@@ -76,113 +76,85 @@ def allpeoplecom(dataRow, website_name, in_user_email, run_mode):
             options.headless()
             
         page = ChromiumPage(addr_or_opts=options)
-        page.get("https://allpeople.com")
+        # 2026-10-04 round-2 capture: removals now start at /removal — e-mail
+        # + "I am the subject" checkbox + Cloudflare Turnstile, then "Begin
+        # Removal Process", then search for the record, click Remove, and
+        # confirm the link they e-mail. The old search-first flow lost its
+        # "Remove Contact" link (57/81 crashes last week).
+        helpers = __import__("lib.broker_helpers", fromlist=["set_turnstile_response", "log_step"])
+        from lib.email_verification import do_email_verification
 
-        cnt = 0
+        def _wait_cloudflare():
+            for _ in range(20):
+                if "just a moment" not in (page.title or "").lower():
+                    return
+                page.actions.click(); page.actions.key_down("TAB"); sleep(0.2); page.actions.key_up("TAB"); sleep(0.2)
+                page.actions.key_down("SPACE"); sleep(0.2); page.actions.key_up("SPACE"); sleep(1.0)
 
-        while True:
-            cnt = cnt + 1
-            if cnt > 20 : 
-                break
-            page_title = page.title
-            if "just a moment" in page_title.lower() :
-                page.actions.click()
-                page.actions.key_down("TAB")
-                sleep(0.2)
-                page.actions.key_up("TAB")
-                sleep(0.2)
-
-                page.actions.key_down("SPACE")
-                sleep(0.2)
-                page.actions.key_up("SPACE")
-
-                sleep(1.0)
-                print("Cloudflare solving...")
-            else :
-                break
-        
-        fullName_input = page.ele("tag:input@@name=ss")
-        fullName_input.click()
-        sleep(random.uniform(0.1, 0.5))
-        _human_type2(fullName_input, dataRow["Name"])
-
-        city_state = dataRow["City"] + ", " + dataRow["State"]
-        city_state_input = page.ele("tag:input@@id=where_input")
-        city_state_input.click()
-        sleep(random.uniform(0.1, 0.5))
-        _human_type2(city_state_input, city_state)
-
-        search_btn = page.ele("tag:button@@id=sbutton")
-        search_btn.click()
-
+        page.get("https://allpeople.com/removal")
+        _wait_cloudflare()
+        email_str = generate_email(dataRow["Name"])
+        email_input = page.ele("tag:input@@id=email", timeout=10)
+        if not email_input:
+            raise RuntimeError("allpeoplecom: /removal has no e-mail box (layout changed)")
+        email_input.click()
+        _human_type2(email_input, email_str)
+        agree = page.ele("tag:input@@id=agreement-checkbox", timeout=3)
+        if agree:
+            agree.click(by_js=True)
+        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
+        solver = TwoCaptcha(apiKey)
+        print("Turnstile is solving...")
+        token = solver.turnstile(sitekey="0x4AAAAAADrCYNwMZjIWZO8F", url="https://allpeople.com/removal")["code"]
+        helpers.set_turnstile_response(page, token)
         sleep(1)
+        begin = page.ele("tag:input@@value=Begin Removal Process", timeout=3) or page.ele("css:form.removal-form [type=submit]")
+        begin.click()
+        sleep(4)
+        _wait_cloudflare()
 
-        cnt = 0
+        # search for the record
+        name_box = page.ele("tag:input@@name=ss", timeout=8) or page.ele("css:input[type=search]", timeout=3)
+        if not name_box:
+            raise RuntimeError("allpeoplecom: no search box after Begin Removal Process")
+        name_box.click()
+        _human_type2(name_box, dataRow["Name"])
+        where = page.ele("tag:input@@id=where_input", timeout=2)
+        if where:
+            where.click()
+            _human_type2(where, dataRow["City"] + ", " + dataRow["State"])
+        (page.ele("tag:button@@id=sbutton", timeout=2) or page.ele("css:button[type=submit]")).click()
+        sleep(3)
+        _wait_cloudflare()
 
-        while True:
-            cnt = cnt + 1
-            if cnt > 20 : 
-                break
-            page_title = page.title
-            if "just a moment" in page_title.lower() :
-                page.actions.click()
-                page.actions.key_down("TAB")
-                sleep(0.2)
-                page.actions.key_up("TAB")
-                sleep(0.2)
-
-                page.actions.key_down("SPACE")
-                sleep(0.2)
-                page.actions.key_up("SPACE")
-
-                sleep(1.0)
-                print("Cloudflare solving...")
-            else :
-                break
-
-        sleep(1)
-        details_btn = page.eles("tag:a@@text()=Details")
-        if len(details_btn) > 0 :
-            details_btn[0].click()
-
-            sleep(0.5)
-            remove_btn = page.ele("tag:a@@title=Remove Contact")
-            remove_btn.click()
-
-            privacy_checkbox = page.ele("tag:input@@id=id_reason_0")
-            privacy_checkbox.click()
-
-            info_input = page.ele("tag:input@@id=id_info")
-            info_input.input("I want to remove my info from your site.")
-
-            apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
-            solver = TwoCaptcha(apiKey)
-            print("Captcha is solving...")
-            try :
-                site_key = "6LfrfkwUAAAAAOzaM6N-Jk-uT3p-KYjf9sO_zwZB"
-                site_url = page.url
-                result = solver.recaptcha(site_key, site_url)
-                print("Captcha is solved.")
-                print(result["code"])
-                Code = result["code"]
-            except Exception as e:
-                print("Error: ", str(e))
-
-            iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-            recaptcha_input_token = iframe_container.ele("tag:input@@id=recaptcha-token")
-            recaptcha_input_token.set.attr("value", Code)
-
-            textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
-            textarea_token.set.innerHTML(Code)
-
-            iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-            recaptcha_input_token1 = iframe_container1.ele("tag:input@@id=recaptcha-token")
-            recaptcha_input_token1.set.attr("value", Code)
-
-            sleep(random.uniform(0.5, 1))
-
-            submit_btn = page.ele("tag:button@@text()=Submit")
+        details = page.eles("tag:a@@text()=Details")
+        if not details:
+            helpers.log_step("allpeoplecom", "no listing found for this name; nothing to remove")
+            page.get_screenshot(screenshot_save_path)
+            return screenshot_save_path
+        details[0].click()
+        sleep(2)
+        remove_btn = (page.ele("tag:a@@title=Remove Contact", timeout=3) or page.ele("tag:a@@text():Remove", timeout=2)
+                      or page.ele("tag:button@@text():Remove", timeout=2) or page.ele("css:a[href*='remov']", timeout=2))
+        if not remove_btn:
+            raise RuntimeError("allpeoplecom: listing page has no Remove button")
+        remove_btn.click()
+        sleep(3)
+        reason = page.ele("tag:input@@id=id_reason_0", timeout=2)
+        if reason:
+            reason.click(by_js=True)
+        info = page.ele("tag:input@@id=id_info", timeout=1)
+        if info:
+            info.input("I want to remove my info from your site.")
+        submit_btn = page.ele("tag:button@@text()=Submit", timeout=2) or page.ele("css:button[type=submit], input[type=submit]", timeout=2)
+        if submit_btn:
             submit_btn.click()
+            sleep(4)
+        page.get_screenshot(screenshot_save_path)
+
+        # they e-mail a confirmation link; the removal only happens when it is opened
+        if not do_email_verification("allpeople", screenshot_save_path):
+            raise RuntimeError("allpeoplecom: removal requested for %s but no confirmation e-mail link was found" % email_str)
 
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)

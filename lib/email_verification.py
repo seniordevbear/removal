@@ -37,7 +37,7 @@ def login(driver) :
     login_btn.click()
 
 
-def do_email_verification(site_name, screenshot_save_path) :
+def do_email_verification(site_name, screenshot_save_path, after_click=None) :
 
     arguments = [
         "-no-first-run",
@@ -67,6 +67,11 @@ def do_email_verification(site_name, screenshot_save_path) :
     
     is_checked = False
 
+    # 2026-10-04: returns True when a confirmation link was clicked, False
+    # otherwise, so brokers can fail honestly instead of assuming. When the
+    # known button texts are absent, any link whose address looks like a
+    # confirmation/opt-out link is tried. after_click(tab) lets the caller
+    # fill a form the link opens (advancedbackgroundchecks) before Chrome quits.
     button_texts = [
         "Confirm Email",
         "click here",
@@ -181,15 +186,27 @@ def do_email_verification(site_name, screenshot_save_path) :
         if site_name.lower() in title.lower():
             row.click()
             sleep(1)
+            button = None
             for text in button_texts:
                 button = driver.ele(f"tag:a@@text()={text}", timeout=0.5)
                 if button:
-                    button.click()
-                    is_checked = True
-                    sleep(30)
+                    break
+            if not button:
+                for frag in ("confirm", "verify", "opt-out", "optout", "remov", "unsubscribe"):
+                    button = driver.ele("tag:a@@href:" + frag, timeout=0.5)
+                    if button:
+                        break
+            if button:
+                button.click()
+                is_checked = True
+                sleep(30)
+                try:
                     driver.latest_tab.get_screenshot(screenshot_save_path)
                     print("ScreenShot is correctly saved.")
-                    break
+                except Exception:
+                    pass
+                if after_click is not None:
+                    after_click(driver.latest_tab)
             if is_checked:
                 break
 
@@ -209,17 +226,29 @@ def do_email_verification(site_name, screenshot_save_path) :
             if site_name.lower() in title.lower():
                 row.click()
                 sleep(1)
+                button = None
                 for text in button_texts:
                     button = driver.ele(f"tag:a@@text()={text}", timeout=0.5)
                     if button:
-                        button.click()
-                        is_checked = True
-                        sleep(30)
+                        break
+                if not button:
+                    for frag in ("confirm", "verify", "opt-out", "optout", "remov", "unsubscribe"):
+                        button = driver.ele("tag:a@@href:" + frag, timeout=0.5)
+                        if button:
+                            break
+                if button:
+                    button.click()
+                    is_checked = True
+                    sleep(30)
+                    try:
                         driver.latest_tab.get_screenshot(screenshot_save_path)
                         print("ScreenShot is correctly saved.")
-                        break
+                    except Exception:
+                        pass
+                    if after_click is not None:
+                        after_click(driver.latest_tab)
                 if is_checked:
                     break
 
     driver.quit()
-
+    return is_checked

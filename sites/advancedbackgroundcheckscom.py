@@ -84,69 +84,80 @@ def advancedbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode):
             
         page = ChromiumPage(addr_or_opts=options)
 
-        url="https://www.advancedbackgroundchecks.com/removal"
+        # 2026-10-04 round-2 capture: /removal is a 404. The opt-out now starts
+        # at /opt-out: "I am" (subject), first/last name, e-mail, reCAPTCHA
+        # (6LdYzess...), honeypot input name=company that must stay empty.
+        # They e-mail a link to the real opt-out form; we open it from the
+        # confirmation mailbox and fill whatever it asks for.
+        helpers = __import__("lib.broker_helpers", fromlist=["log_step", "find_input", "safe_select"])
+        from lib.email_verification import do_email_verification
+
+        url = "https://www.advancedbackgroundchecks.com/opt-out"
         page.get(url)
-
-        cnt = 0
-
-        while True:
-            cnt = cnt + 1
-            if cnt > 20 : 
+        for _ in range(20):
+            if "just a moment" not in (page.title or "").lower():
                 break
-            page_title = page.title
-            if "just a moment" in page_title.lower() :
-                page.actions.click()
-                page.actions.key_down("TAB")
-                sleep(0.2)
-                page.actions.key_up("TAB")
-                sleep(0.2)
+            page.actions.click(); page.actions.key_down("TAB"); sleep(0.2); page.actions.key_up("TAB"); sleep(0.2)
+            page.actions.key_down("SPACE"); sleep(0.2); page.actions.key_up("SPACE"); sleep(1.0)
 
-                page.actions.key_down("SPACE")
-                sleep(0.2)
-                page.actions.key_up("SPACE")
-
-                sleep(1.0)
-                print("Cloudflare solving...")
-            else :
-                break
-        
-        email_input = page.ele("tag:input@@id=emailForOptout")
-        email_input.click()
-        sleep(random.uniform(0.1, 0.5))
-        _human_type2(email_input, generate_email(dataRow["Name"]))
-
-        agree_checkbox = page.ele("tag:input@@name=agreement")
-        agree_checkbox.click()                
+        fName = dataRow["Name"].split()[0]
+        lName = dataRow["Name"].split()[-1]
+        mode = page.ele("tag:select@@id=mode", timeout=10)
+        if not mode:
+            raise RuntimeError("advancedbackgroundcheckscom: /opt-out form not found (layout changed)")
+        mode.select.by_value("subject")
+        for fid, val in (("sfn", fName), ("sln", lName), ("semail", generate_email(dataRow["Name"]))):
+            el = page.ele("tag:input@@id=" + fid)
+            el.click()
+            sleep(random.uniform(0.1, 0.4))
+            _human_type2(el, val)
 
         apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
         solver = TwoCaptcha(apiKey)
         print("Captcha is solving...")
-        try :
-            site_key = "6LclhJYeAAAAACIQRD3ZvhfN7Pemn-Y_M28Ifq0y"
-            site_url = "https://www.advancedbackgroundchecks.com/removal"
-            print("-------------")
-            result = solver.recaptcha(site_key, site_url)
-            
-            print("===========")
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            pass
+        Code = solver.recaptcha("6LdYzessAAAAACnQqZugXee4rNpMsD-6X1paSkS8", url)["code"]
+        page.run_js(
+            "var t=arguments[0];"
+            "document.querySelectorAll(\"textarea[name='g-recaptcha-response']\")"
+            ".forEach(function(e){e.style.display='block';e.value=t;});", Code)
+        sleep(1)
+        page.ele("css:form button[type=submit]").click()
+        sleep(5)
+        page.get_screenshot(screenshot_save_path)
 
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        recaptcha_input_token = iframe_container.ele("tag:input@@id=recaptcha-token")
-        recaptcha_input_token.set.attr("value", Code)
+        def _fill_optout_form(tab):
+            # The e-mailed link opens the actual opt-out form. Its fields have
+            # not been captured yet, so match by id/name/placeholder.
+            def box(aliases):
+                cands = []
+                for a in aliases:
+                    cands += ["css:input[id*='%s' i]" % a, "css:input[name*='%s' i]" % a, "css:input[placeholder*='%s' i]" % a]
+                try:
+                    return helpers.find_input(tab, *cands, timeout=2.0)
+                except ValueError:
+                    return None
+            filled = 0
+            for aliases, val in ((("first", "fname"), fName), (("last", "lname"), lName),
+                                 (("address", "street"), dataRow.get("Address") or ""),
+                                 (("city",), dataRow.get("City") or ""),
+                                 (("zip", "postal"), str(dataRow.get("Zipcode") or "")),
+                                 (("age",), str(dataRow.get("Age") or ""))):
+                el = box(aliases)
+                if el and val:
+                    el.click(); el.input(val); filled += 1
+            try:
+                helpers.safe_select(tab, "css:select[id*='state' i], select[name*='state' i]", dataRow.get("State") or "", timeout=2.0)
+            except Exception:
+                pass
+            btn = tab.ele("css:button[type=submit], input[type=submit]", timeout=3)
+            if not filled or not btn:
+                raise RuntimeError("advancedbackgroundcheckscom: e-mailed opt-out form not recognised (filled %d boxes, submit=%s) — capture it" % (filled, bool(btn)))
+            btn.click()
+            sleep(5)
+            tab.get_screenshot(screenshot_save_path)
 
-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
-        textarea_token.set.innerHTML(Code)
-
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        recaptcha_input_token1 = iframe_container1.ele("tag:input@@id=recaptcha-token")
-        recaptcha_input_token1.set.attr("value", Code)
-
-        form_container = page.ele("tag:form@@id=removalForm")      
-        page.run_js("arguments[0].submit();", form_container)
+        if not do_email_verification("advancedbackgroundchecks", screenshot_save_path, after_click=_fill_optout_form):
+            raise RuntimeError("advancedbackgroundcheckscom: opt-out link requested but no e-mail link was found")
 
         sleep(2)
         

@@ -741,23 +741,14 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
                     found = True
                     break
             if not found and broker_name.endswith("courtrecordsus"):
-                # 2026-10-04 survey: the state *courtrecords.us sites have no
-                # portal of their own (arkansascourtrecords.us/request-portal
-                # and /optout/ both 404); their privacy page sends consumers
-                # to the network-wide page, behind an "I Agree" FCRA gate.
-                url = "https://courtrecords.us/optout/"
-                log_step(broker_name, "GET " + url)
-                page.get(url)
-                sleep(2.5)
-                try:
-                    agree = page.ele("xpath://button[contains(.,'I Agree')] | //a[contains(.,'I Agree')]", timeout=3)
-                    if agree:
-                        agree.click()
-                        sleep(2.5)
-                except Exception:
-                    pass
-                if _has_form():
-                    found = True
+                # 2026-10-04 round-2 capture: courtrecords.us/optout/ is a policy
+                # page with no form, and its Do-Not-Sell page states the route:
+                # "submit your request by emailing privacy@courtrecords.us.
+                # Please include your first name, last name, state, and city".
+                log_step(broker_name, "no portal on this family; CCPA e-mail to privacy@courtrecords.us")
+                return run_ccpa_email_optout(broker_name, dataRow,
+                                             privacy_email="privacy@courtrecords.us",
+                                             run_mode=run_mode)
             if not found:
                 # 2026-09-24: the *arrests.org name covers TWO platforms. Only
                 # some (indianaarrests.org) run the WPForms portal; the rest
