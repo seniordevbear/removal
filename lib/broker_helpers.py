@@ -575,7 +575,9 @@ def select_onetrust_state(container, raw, timeout=3):
     """
     raw = (raw or "").strip()
     if not raw:
-        raise RuntimeError("state option not found on OneTrust form; profile state is ''")
+        # 2026-10-04: 175 rows/day hit this with an empty profile state. That
+        # is missing customer data, not a broken script -> step 5.
+        raise missing_pii("State")
     cands = []
     for c in (_state_full_name(raw), raw, raw.upper(), raw.title()):
         if c and c not in cands:
@@ -591,7 +593,12 @@ def select_onetrust_state(container, raw, timeout=3):
             if opt:
                 opt.click()
                 return True
-    raise RuntimeError("no state option matched; tried %r" % (cands,))
+    # 2026-10-04: newer OneTrust forms only list options after you type into
+    # the autocomplete box ("no state option matched; tried ['Nevada', 'NV']").
+    try:
+        return select_onetrust_autocomplete(container, "stateDSARElement", cands, timeout=2)
+    except Exception as e:
+        raise RuntimeError("no state option matched; tried %r (%s)" % (cands, e))
 
 
 def _state_full_name(raw):

@@ -71,6 +71,41 @@ ROUND3 = {
     "callersmartcom-data": "https://www.callersmart.com/data",
 }
 
+# Round 4 (2026-10-04 evening): every broker that crashed 5+ times on the new
+# code, plus the confirmation-mailbox login page the e-mail-link brokers need.
+#     Scripts\python.exe capture_forms.py round4
+ROUND4 = {
+    "mailbox-login": "https://mail1.privacypros.com/surgeweb",
+    "brooksimcom": "https://www.brooksim.com/privacy-form",
+    "myypcom": "https://www.myyp.com/optout",
+    "ncsolutionscom": "https://ncsolutions.com/do-not-sell-my-information/",
+    "numlookupcom": "https://www.numlookup.com/opt_out",
+    "nuwbercom": "https://nuwber.com/",
+    "oldphonebookcom": "https://www.oldphonebook.com/",
+    "bytwocom": "https://privacyportal.onetrust.com/webform/e32c5e49-85c5-4969-bfa8-8cde49952e1f/6034339d-69de-41fc-829f-7b8b51d9fabe",
+    "onlinepeoplesearchcom": "https://onlinepeoplesearch.com/optout",
+    "aritotlecom": "https://www.aristotle.com/privacy/do-not-sell-my-personal-info/",
+    "mediadirectcom": "https://360-media-direct.privacy.saymine.io/360_Media_Direct",
+    "kidslivesafecom": "https://www.kidslivesafe.com/help-center/privacy-requests",
+    "contacts411com": "https://contacts411.com/opt-out",
+    "searchpeoplefreecom": "https://www.searchpeoplefree.com/opt-out",
+    "peoplesearchnowcom": "https://www.peoplesearchnow.com/opt-out",
+    "idcrawlcom": "https://www.idcrawl.com/remove-my-information",
+    "kingmarketinggroupcom": "https://kingmarketinggroup.com/do-not-sell-my-personal-information/",
+    "l2politicalcom": "https://www.l2-data.com/california-privacy-rights-for-california-residents-only/",
+    "limeleadscom": "https://www.limeleads.com/do-not-sell-my-data-request/",
+    "cognismcom": "https://www.cognism.com/data-opt-out",
+    "idtruecom": "https://www.idtrue.com/optout",
+    "i360com": "https://privacyportal.onetrust.com/webform/77dff651-9f08-40cd-99fe-a7c487b2504d/fd25e566-5931-4987-ae94-13ffd3306913",
+    "inmarketcom": "https://inmarket.com/opt-out/",
+    "jmrmediacom": "https://jmr-media.com/do-not-sell-my-personal",
+    "mediawallahcom": "https://mediawallah.com/donotsell/",
+    "internetbrandscom": "https://mynt-test-privacy.my.onetrust.com/webform/ebe19500-bc8d-487f-9d89-98fde8b270e2/6345c7af-b8c5-4ee6-a6f7-9418a3fe079b",
+    "optoutprescreencom": "https://www.optoutprescreen.com/",
+    "hirerightcom": "https://www.hireright.com/u-s-state-consumer-privacy-rights-request-form",
+    "belardiwongcom": "https://privacyportal.onetrust.com/webform/3d2d5e0c-bd98-46b8-906c-ede68a6f6a80/400f54ed-fcbb-4749-ab5b-32f491c72390",
+}
+
 
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
@@ -97,7 +132,7 @@ def main():
 
     ok = fail = 0
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    targets = {"round2": ROUND2, "round3": ROUND3}.get(arg, TARGETS)
+    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)

@@ -71,10 +71,25 @@ def fill_input_data(page, dataRow) :
         helpers.log_step("americaphonebookcom", "number not listed; nothing to remove")
         return "not_listed"
 
-    remove_link = page.ele("tag:a@@text():Remove", timeout=5) or page.ele("tag:a@@href:remov", timeout=2)
-    if not remove_link:
-        raise RuntimeError("americaphonebookcom: listing page has no Remove link (layout changed)")
-    remove_link.click()
+    # 2026-10-04 (live page): each listing row carries
+    #   <form action="delete.php" onclick="return confirm(...)">
+    #     <input type=hidden name=zip> <input type=hidden name=number>
+    #     <input type=submit value="Remove Listing">
+    # Pick the form whose hidden number is this phone, drop the confirm()
+    # and submit it. 41 runs died looking for an <a> that never existed.
+    forms = page.eles("tag:form@@action=delete.php", timeout=5)
+    target = None
+    for f in forms:
+        num = f.ele("tag:input@@name=number", timeout=0.5)
+        if num and _re.sub(r"\D", "", num.attr("value") or "") == phone:
+            target = f
+            break
+    if target is None and forms:
+        target = forms[0]
+    if target is None:
+        raise RuntimeError("americaphonebookcom: listing page has no Remove Listing form (layout changed)")
+    page.set.auto_handle_alert(True)
+    target.run_js("this.onclick = null; this.submit();")
     sleep(3)
     return "removed"
 

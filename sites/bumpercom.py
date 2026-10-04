@@ -74,9 +74,14 @@ def fill_input_data(page, dataRow) :
         account_type.select.by_value("guest")
         sleep(random.uniform(0.5, 1))
 
+    # 2026-10-04 log: the dialog button reports displayed but has no rect
+    # (NoRectError on 100+ runs) -> click through JS.
     yes_button = page.ele("tag:button@@aria-label=delete-information-yes-button", timeout=3)
-    if yes_button and yes_button.states.is_displayed:
-        yes_button.click()
+    if yes_button:
+        try:
+            yes_button.click(by_js=True)
+        except Exception:
+            pass
         sleep(random.uniform(0.5, 1))
 
     first_name = form_container.ele("tag:input@@id=fname")
@@ -175,8 +180,11 @@ def bumpercom(dataRow, website_name, in_user_email, run_mode) :
         submit_button.click()
         sleep(random.uniform(1, 2))
         yes_button = page.ele("tag:button@@aria-label=delete-information-yes-button", timeout=4)
-        if yes_button and yes_button.states.is_displayed:
-            yes_button.click()
+        if yes_button:
+            try:
+                yes_button.click(by_js=True)
+            except Exception:
+                pass
 
         sleep(1)
         
