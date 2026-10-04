@@ -60,17 +60,27 @@ def fill_input_data(page, dataRow) :
     sleep(random.uniform(0.1,0.5))
     _human_type2(email_input, generate_email(dataRow["Name"]))
 
+    # 2026-10-04: the form wants the LINK to the listing (required) and a
+    # "Confirm Address(es) on File" textarea named address — there is no
+    # textarea named message, which is where 16/16 runs died last week.
+    link = (dataRow.get("Profile URL") or "").strip()
+    if not link:
+        raise __import__("lib.broker_helpers", fromlist=["missing_pii"]).missing_pii("Profile URL")
     url_input = page.ele("tag:input@@name=url")
     url_input.click()
     print("typing the url...")
     sleep(random.uniform(0.1,0.5))
-    _human_type2(url_input, url)
+    _human_type2(url_input, link)
 
-    message_textarea = page.ele("tag:textarea@@name=message")
-    message_textarea.click()
-    print("typing the message...")
+    full_addr = ", ".join(x for x in (
+        (dataRow.get("Address") or dataRow.get("Street") or "").strip(),
+        (dataRow.get("City") or "").strip(),
+        " ".join(y for y in ((dataRow.get("State") or "").strip(), str(dataRow.get("Zipcode") or "").strip()) if y),
+    ) if x)
+    address_textarea = page.ele("tag:textarea@@name=address")
+    address_textarea.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(message_textarea, dataRow["Name"])
+    _human_type2(address_textarea, full_addr or "No address on file; please remove the listing above.")
 
 def mineralholderscom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
@@ -117,19 +127,11 @@ def mineralholderscom(dataRow, website_name, in_user_email, run_mode) :
         except Exception as e:
             pass
 
-        captcha_iframe = page.ele("tag:iframe@@title=Widget containing checkbox for hCaptcha security challenge")
-
-        captcha_iframe.set.attr("data-hcaptcha-response", Code)
-
-        form_container = page.ele("tag:form@@role=form")
-
-        g_textarea = page.ele("tag:textarea@@name=g-recaptcha-response")
-        # g_textarea.set.attr("value", Code)
-        g_textarea.set.innerHTML(Code)
-
-        h_textarea = page.ele("tag:textarea@@name=h-captcha-response")
-        # h_textarea.set.attr("value", Code)
-        h_textarea.set.innerHTML(Code)
+        page.run_js(
+            "var t=arguments[0];"
+            "document.querySelectorAll(\"textarea[name='h-captcha-response'],textarea[name='g-recaptcha-response']\")"
+            ".forEach(function(e){e.style.display='block';e.value=t;});", Code)
+        sleep(1)
 
         submit_button = page.ele("tag:input@@value=Submit Comment")
         submit_button.click()

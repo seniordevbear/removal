@@ -61,6 +61,8 @@ ROUND2 = {
     "acbjcom-privacy": "https://www.acbj.com/privacy",
     "bizjournalscom-privacy": "https://www.bizjournals.com/privacy",
     "ohioarrestsorg-contact": "https://www.ohioarrests.org/contact-form",
+    "careerbuildercom-onetrust": "https://privacyportal.onetrust.com/webform/a7e660bb-bfdf-4dd0-b65c-49ce834f786e/5edf5e8a-3d83-4e49-9d3a-cb2fb031f49f",
+    "callersmartcom-data": "https://www.callersmart.com/data",
 }
 
 

@@ -49,43 +49,24 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
     
-    fName_input = page.ele("tag:input@@name=first-name")
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
+    # 2026-10-04: the page is a Wix form now — inputs carry no name
+    # attribute, only aria-label (First name / Last name / Email / Address /
+    # City / State / Zip Code). 16/16 runs last week died on name=first-name.
+    def _box(label):
+        el = page.ele("tag:input@@aria-label=" + label, timeout=8)
+        if not el:
+            raise RuntimeError("milestonemarketingsolutionscom: no input labelled %r" % label)
+        el.click()
+        sleep(random.uniform(0.1, 0.4))
+        return el
 
-    lName_input = page.ele("tag:input@@name=last-name")
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    email_input = page.ele("tag:input@@name=email")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
-
-    street_input = page.ele("tag:input@@name=street-address")
-    street_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(street_input, dataRow["Street"])
-
-    city_input = page.ele("tag:input@@name=city")
-    city_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(city_input, dataRow["City"])
-
-    state_input = page.ele("tag:input@@name=state")
-    state_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(state_input, dataRow["State"])
-
-    zip_input = page.ele("tag:input@@name=zip-code")
-    zip_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
+    _human_type2(_box("First name"), fName)
+    _human_type2(_box("Last name"), lName)
+    _human_type2(_box("Email"), generate_email(dataRow["Name"]))
+    _human_type2(_box("Address"), dataRow["Address"])
+    _human_type2(_box("City"), dataRow["City"])
+    _human_type2(_box("State"), __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
+    _human_type2(_box("Zip Code"), str(dataRow["Zipcode"]))
 
 def milestonemarketingsolutionscom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
@@ -117,7 +98,7 @@ def milestonemarketingsolutionscom(dataRow, website_name, in_user_email, run_mod
 
         sleep(random.uniform(3, 5))
         page.wait.eles_loaded("tag:button@@text()=Submit")
-        submit_button = page.ele("tag:button@@text()=Submit")
+        submit_button = page.ele("tag:button@@data-hook=submit-button", timeout=5) or page.ele("tag:button@@text()=Submit")
         submit_button.click()
 
         
