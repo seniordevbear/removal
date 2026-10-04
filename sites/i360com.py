@@ -109,6 +109,9 @@ def fill_input_data(page, dataRow) :
    
 
 def i360com(dataRow, website_name, in_user_email, run_mode) : 
+    # 2026-10-04: NotImplementedError -> manage.py parks the row as step 4
+    # ("no automation") instead of crashing on it every day.
+    raise NotImplementedError("i360com: i360's OneTrust webform 77dff651-.../fd25e566-... returns 'The requested content is no longer available' (captured 2026-10-04)")
     page = None
     try : 
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"

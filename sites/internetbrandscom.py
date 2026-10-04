@@ -58,6 +58,8 @@ def fill_input_data(page, dataRow) :
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
     sleep(2)
  
+    # 2026-10-04 capture: Country autocomplete comes first and gates State.
+    __import__("lib.broker_helpers", fromlist=["select_onetrust_country"]).select_onetrust_country(page)
     state_select = page.ele("tag:input@@id=stateDSARElement")
     state_select.click()
     sleep(random.uniform(0.1,0.5))

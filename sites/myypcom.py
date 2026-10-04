@@ -79,6 +79,9 @@ def fill_input_data(page, dataRow) :
     _human_type2(email_input, generate_email(dataRow["Name"]))
 
 def myypcom(dataRow, website_name, in_user_email, run_mode) : 
+    # 2026-10-04: NotImplementedError -> manage.py parks the row as step 4
+    # ("no automation") instead of crashing on it every day.
+    raise NotImplementedError("myypcom: myyp.com/optout returns HTTP 404 (captured 2026-10-04); no opt-out page found")
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name

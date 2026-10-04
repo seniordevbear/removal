@@ -49,11 +49,22 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
-    phone_input = page.ele("tag:input@@id=lookup_number")
-    phone_input.click()
-    print("typing the phone number...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, dataRow["Phone Number"])
+    # 2026-10-04 capture: the form takes a phone number OR a full name +
+    # state (name lookup). Use the number when we have one.
+    import re as _re
+    phone = _re.sub(r"\D", "", dataRow.get("Phone Number") or "")
+    if len(phone) == 11 and phone.startswith("1"):
+        phone = phone[1:]
+    if len(phone) == 10:
+        phone_input = page.ele("tag:input@@id=lookup_number")
+        phone_input.click()
+        sleep(random.uniform(0.1,0.5))
+        _human_type2(phone_input, phone)
+    else:
+        name_input = page.ele("tag:input@@name=lookup-name")
+        name_input.click()
+        _human_type2(name_input, dataRow["Name"])
+        __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(page.ele("tag:select@@id=state"), dataRow["State"])
 
 
 def numlookupcom(dataRow, website_name, in_user_email, run_mode) : 
@@ -111,52 +122,17 @@ def numlookupcom(dataRow, website_name, in_user_email, run_mode) :
 
         fill_input_data(page, dataRow)
 
-        page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA")
-        sleep(1)
-        
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
-        print(rc_anchor_container)
-        rc_anchor_container.click()
-
-        sleep(2)
-        page.wait.ele_displayed("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        sleep(1)
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        audio_button = iframe_container1.ele("tag:button@@id=recaptcha-audio-button")
-
-        print(audio_button)
-        audio_button.click()
-        audio_source = iframe_container1.ele("tag:audio@@id=audio-source").attr("src")
-        print(audio_source)
-
-        response = requests.get(audio_source)
-        with open(("__downloaded_%d.mp3" % __import__("threading").get_ident()), "wb") as file:
-            file.write(response.content)
-
-        sleep(1)
-
+        # 2026-10-04: solve the checkbox reCAPTCHA by token (sitekey from the
+        # live page) instead of the audio challenge; submit is an <input>.
         apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
         solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            result = solver.audio(("__downloaded_%d.mp3" % __import__("threading").get_ident()), lang="en")
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            print("Error: ", str(e))
-        audio_reponse_input = iframe_container1.ele("tag:input@@id=audio-response")
-        _human_type2(audio_reponse_input, Code)
-
-        verify_btn = iframe_container1.ele("tag:button@@id=recaptcha-verify-button")
-        verify_btn.click()
-
-        sleep(5)
-
-        submit_button = page.ele("tag:button@@type=submit@@text()= Remove My Info")
-
-        print(submit_button)
+        Code = solver.recaptcha("6LeriasfAAAAAJYHRn9fTomLucvhG5qJnX-4LRcX", "https://www.numlookup.com/opt_out")["code"]
+        page.run_js(
+            "var t=arguments[0];"
+            "document.querySelectorAll(\"textarea[name='g-recaptcha-response']\")"
+            ".forEach(function(e){e.style.display='block';e.value=t;});", Code)
+        sleep(1)
+        submit_button = page.ele("tag:input@@value=Remove My Info", timeout=3) or page.ele("css:form.frm-optout [type=submit]")
         submit_button.click()
 
         

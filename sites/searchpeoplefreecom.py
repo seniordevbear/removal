@@ -55,10 +55,7 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
     
-    page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA")
-    sleep(1)
-    
-    fName_input = page.ele("tag:input@@id=o_first")
+    fName_input = page.ele("tag:input@@id=o_first", timeout=10)
     fName_input.click()
     print("typing the first name...")
     sleep(random.uniform(0.1,0.5))
@@ -145,35 +142,20 @@ def searchpeoplefreecom(dataRow, website_name, in_user_email, run_mode) :
 
         fill_input_data(page, dataRow)
 
+        # 2026-10-04 capture: reCAPTCHA replaced by Cloudflare Turnstile
+        # (0x4AAAAAAC0RR2lieIy55Ucx); the button e-mails a link that opens the
+        # real opt-out form. 6/6 runs died waiting for the reCAPTCHA iframe.
         apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
         solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            site_key = "6Le4fFYUAAAAANewXA2aOOuPKJ41LQ6U94TTDU0x"
-            site_url = "https://www.searchpeoplefree.com/opt-out"
-            result = solver.recaptcha(site_key, site_url)
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            print("Error: ", str(e))
-
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        print(iframe_container)
-        recaptcha_input_token = iframe_container.ele("tag:input@@id=recaptcha-token")
-        recaptcha_input_token.set.attr("value", Code)
-
-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
-        print(textarea_token)
-        textarea_token.set.innerHTML(Code)
-
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        recaptcha_input_token1 = iframe_container1.ele("tag:input@@id=recaptcha-token")
-        print(recaptcha_input_token1)
-        recaptcha_input_token1.set.attr("value", Code)
-
-        form_container = page.ele("tag:form@@id=o_form")
-        form_container.run_js("this.submit();")        
+        Code = solver.turnstile(sitekey="0x4AAAAAAC0RR2lieIy55Ucx", url="https://www.searchpeoplefree.com/opt-out")["code"]
+        __import__("lib.broker_helpers", fromlist=["set_turnstile_response"]).set_turnstile_response(page, Code)
+        sleep(1)
+        page.ele("tag:button@@id=o_submit").click()
+        sleep(5)
+        page.get_screenshot(screenshot_save_path)
+        from lib.email_verification import do_email_verification
+        if not do_email_verification("searchpeoplefree", screenshot_save_path):
+            raise RuntimeError("searchpeoplefreecom: removal link requested but no confirmation e-mail link was found")
 
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)

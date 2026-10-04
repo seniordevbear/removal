@@ -60,24 +60,19 @@ def fill_input_data(page, dataRow) :
     request_type = page.ele("tag:select@@id=requestType")
     request_type.select.by_text("Delete My Info")
 
-    opt_out_modal = page.ele("tag:div@@id=customer-select")
-    yes_radio = opt_out_modal.ele("tag:input@@value=yes")
-    yes_radio.click()
-
-    modal_submit_btn = opt_out_modal.ele("tag:a@@value=Close")
-    modal_submit_btn.click()
-
-    custom_id_input = page.ele("tag:input@@name=customerId")
-    custom_id_input.clear()
-    custom_id_input.click()
-    _human_type2(custom_id_input, "1")
+    # 2026-10-04 capture: the customer modal is gone; a customerStatus radio
+    # (yes/no/third-party) sits below the form. Customer ID is optional.
+    no_radio = page.ele("tag:input@@name=customerStatus@@value=no", timeout=3)
+    if no_radio:
+        no_radio.click(by_js=True)
 
     first_name = page.ele("tag:input@@id=firstName")
     first_name.clear()
     first_name.click()
     _human_type2(first_name, fName)
 
-    last_name = page.ele("tag:input@@id=lastName")
+    # the last-name box carries a randomised id; the placeholder is stable
+    last_name = page.ele("tag:input@@id=lastName", timeout=2) or page.ele("tag:input@@placeholder=Last Name")
     last_name.clear()
     last_name.click()
     _human_type2(last_name, lName)
@@ -154,13 +149,7 @@ def kidslivesafecom(dataRow, website_name, in_user_email, run_mode) :
 
         sleep(0.3)
 
-        captcha_widget_div = page.ele("tag:div@@data-theme=light")
-        print(captcha_widget_div)
-        div_element = captcha_widget_div.children()[0]
-        print(div_element)
-        turnstile_response_element = div_element.ele("tag:input@@name=cf-turnstile-response")
-        print(turnstile_response_element)
-        page.run_js("arguments[0].value = arguments[1];", turnstile_response_element, Code)
+        __import__("lib.broker_helpers", fromlist=["set_turnstile_response"]).set_turnstile_response(page, Code)
 
         sleep(1)
 

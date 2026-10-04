@@ -106,6 +106,18 @@ ROUND4 = {
     "belardiwongcom": "https://privacyportal.onetrust.com/webform/3d2d5e0c-bd98-46b8-906c-ede68a6f6a80/400f54ed-fcbb-4749-ab5b-32f491c72390",
 }
 
+# Round 5: forms that round 4 showed living inside an <iframe> (the outer
+# page was captured, the form was not). Open the iframe source directly.
+#     Scripts\python.exe capture_forms.py round5
+ROUND5 = {
+    "mailbox-login": "https://mail1.privacypros.com/surgeweb",
+    "brooksimcom-iframe": "https://dsr.trustsuperset.com/?orgId=2dc76d0a-78d2-4492-9fc1-39da892fc0d5",
+    "hirerightcom-iframe": "https://info.hireright.com/l/650513/2024-10-08/561z6m",
+    "mediawallahcom-iframe": "https://privacyportal-eu-cdn.onetrust.com/dsarwebform/e3df3040-c675-462f-99c4-15c05ac3bf5c/545897d5-7793-4317-921b-4efe187a2c02.html",
+    "bytwocom-anteriad": "https://anteriad.com/privacy-policy#your-marketing-and-opt-out-choices",
+    "inmarketcom-center": "https://preferences.inmarket.com/",
+}
+
 
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
@@ -132,7 +144,7 @@ def main():
 
     ok = fail = 0
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4}.get(arg, TARGETS)
+    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)

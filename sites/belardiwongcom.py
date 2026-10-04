@@ -86,28 +86,13 @@ def fill_input_data(page, dataRow) :
     sleep(random.uniform(0.1,0.5))
     _human_type2(city_input, dataRow["City"])
 
+    # 2026-10-04 capture: required Country autocomplete now gates State.
+    from lib.broker_helpers import select_onetrust_country, select_onetrust_state
+    select_onetrust_country(page)
     state_select = page.ele("tag:input@@id=stateDSARElement")
     state_select.click()
     sleep(random.uniform(0.1,0.5))
-    # OneTrust renders vt-option labels as FULL state names ("Texas"), while
-    # profiles hold "TX" (and one real customer holds "Paris" — not a US
-    # state at all). Try full name, the raw value, and the two-letter code;
-    # if none exists, fail with a message that names the actual problem.
-    from lib.broker_helpers import _state_full_name
-    _raw_state = (dataRow["State"] or "").strip()
-    _cands = []
-    for _c in (_state_full_name(_raw_state), _raw_state, _raw_state.upper()):
-        if _c and _c not in _cands:
-            _cands.append(_c)
-    for _c in _cands:
-        _opt = page.ele(f"tag:vt-option@@aria-label={_c}", timeout=3)
-        if _opt:
-            _opt.click()
-            break
-    else:
-        raise RuntimeError(
-            "state option not found on OneTrust form; profile state is %r, tried %r"
-            % (_raw_state, _cands))
+    select_onetrust_state(page, dataRow["State"])
 
     zip_input = page.ele("tag:input@@id=zipDSARElement")
     zip_input.click()

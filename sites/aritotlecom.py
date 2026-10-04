@@ -120,8 +120,14 @@ def aritotlecom(dataRow, website_name, in_user_email, run_mode):
         sleep(random.uniform(0.1, 0.5))
         _human_type2(city_input, dataRow["City"])
 
+        # 2026-10-04 capture: the State list only holds the states with a
+        # privacy law plus "Other"; pick "Other" for everyone else.
+        helpers = __import__("lib.broker_helpers", fromlist=["select_state", "_state_full_name"])
         state_select = page.ele("tag:select@@name=input_9")
-        __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
+        try:
+            helpers.select_state(state_select, dataRow["State"])
+        except Exception:
+            state_select.select.by_text("Other")
 
         zip_input = page.ele("tag:input@@name=input_8")
         zip_input.click()
@@ -133,42 +139,24 @@ def aritotlecom(dataRow, website_name, in_user_email, run_mode):
         sleep(random.uniform(0.1, 0.5))
         _human_type2(email_input, generate_email(dataRow["Name"]))
 
-        birthmonth_select = page.ele("tag:select@@id=input_11_17_1")
-        birthmonth_select.select.by_text(str(dataRow["Birth Month"]))
+        if str(dataRow.get("Birth Year") or "").strip().isdigit():
+            page.ele("tag:select@@id=input_11_17_1").select.by_text(str(int(dataRow["Birth Month"])))
+            page.ele("tag:select@@id=input_11_17_2").select.by_text(str(int(dataRow["Birth Day"])))
+            page.ele("tag:select@@id=input_11_17_3").select.by_text(str(int(dataRow["Birth Year"])))
 
-        birthday_select = page.ele("tag:select@@id=input_11_17_2")
-        birthday_select.select.by_text(str(dataRow["Birth Day"]))
+        # 2026-10-04 capture: reCAPTCHA is gone; Gravity Forms shows an image
+        # captcha (img.gfield_captcha -> #input_11_23). input_24 "Comments" is
+        # a honeypot and must stay empty. The submit control is a <button>.
+        captcha_img = page.ele("tag:img@@class=gfield_captcha", timeout=6)
+        if captcha_img:
+            code = helpers.solve_image_captcha_element(page, captcha_img, "aritotlecom")
+            cap = page.ele("tag:input@@id=input_11_23")
+            cap.click()
+            _human_type2(cap, code)
+            sleep(0.5)
 
-        birthyear_select = page.ele("tag:select@@id=input_11_17_3")
-        birthyear_select.select.by_text(str(dataRow["Birth Year"]))
-
-        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
-        solver = TwoCaptcha(apiKey)
-
-        print("Captcha is solving...")
-        try :
-            site_key = "6LdckyUTAAAAAPR5m8YPaAeb9Rv_RgWLo2QgW56i"
-            site_url = page.url
-            result = solver.recaptcha(site_key, site_url)
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            pass
-
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        recaptcha_input_token = iframe_container.ele("tag:input@@id=recaptcha-token")
-        recaptcha_input_token.set.attr("value", Code)
-
-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
-        textarea_token.set.innerHTML(Code)
-
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        recaptcha_input_token1 = iframe_container1.ele("tag:input@@id=recaptcha-token")
-        recaptcha_input_token1.set.attr("value", Code)
-
-        submit_btn = page.ele("tag:input@@id=gform_submit_button_11")
-        submit_btn.click()        
+        submit_btn = page.ele("tag:button@@id=gform_submit_button_11", timeout=3) or page.ele("tag:input@@id=gform_submit_button_11")
+        submit_btn.click()
 
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)

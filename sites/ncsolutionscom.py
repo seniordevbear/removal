@@ -91,6 +91,9 @@ def fill_input_data(page, dataRow) :
     _human_type2(zip_input, str(dataRow["Zipcode"]))
 
 def ncsolutionscom(dataRow, website_name, in_user_email, run_mode) : 
+    # 2026-10-04: NotImplementedError -> manage.py parks the row as step 4
+    # ("no automation") instead of crashing on it every day.
+    raise NotImplementedError("ncsolutionscom: ncsolutions.com/do-not-sell-my-information/ now redirects to a Circana press release about the acquisition (captured 2026-10-04); no opt-out form on the new owner's site has been identified")
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name

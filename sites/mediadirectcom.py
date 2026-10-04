@@ -54,57 +54,25 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
     
-    page.wait.ele_displayed("tag:div@@id=state-field")
+    # 2026-10-04 capture (Mine privacy form): state is a label-driven
+    # dropdown of full names, request type is radio #delete, the zip box and
+    # the brand/consent radios have random uuid ids (reached by label text).
+    helpers = __import__("lib.broker_helpers", fromlist=["mine_select_state", "mine_input_by_label", "click_label_text"])
+    page.wait.ele_displayed("tag:label@@for=dropdown-state-field", timeout=15)
     sleep(2)
+    helpers.mine_select_state(page, dataRow["State"])
+    helpers.click_label_text(page, "Delete my data")
 
-    state_div = page.ele("tag:div@@id=state-field")
-    state_div.click()
-    state_element = page.ele(f"tag:li@@data-label={dataRow["State"]}")
-    state_element.click()
+    def _type(el, val):
+        el.clear(); el.click(); sleep(random.uniform(0.1, 0.4)); _human_type2(el, val)
 
-    delete_label = page.ele("tag:label@@for=delete")
-    delete_label.click()
- 
-    fName_input = page.ele("tag:input@@id=fname-field")
-    fName_input.clear()
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
-
-    lName_input = page.ele("tag:input@@id=lname-field")
-    lName_input.clear()
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    email_str = generate_email(dataRow["Name"])
-    email_input = page.ele("tag:input@@id=email-field")
-    email_input.clear()
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, email_str)
-    
-    address_input = page.ele("tag:input@@id=address-field")
-    address_input.clear()
-    address_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
-
-    zip_input = page.ele("tag:input@@id=Zip Code/Postal Code")
-    zip_input.clear()
-    zip_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
-
-    checkbox_4 = page.ele("tag:label@@for=custom-question-1-4")
-    checkbox_4.click()
-
-    yes_checkbox = page.ele("tag:label@@for=custom-question-2-0")
-    yes_checkbox.click()
-
+    _type(page.ele("tag:input@@id=fname-field"), fName)
+    _type(page.ele("tag:input@@id=lname-field"), lName)
+    _type(page.ele("tag:input@@id=email-field"), generate_email(dataRow["Name"]))
+    _type(page.ele("tag:input@@id=address-field"), dataRow["Address"])
+    _type(helpers.mine_input_by_label(page, "Zip Code/Postal Code"), str(dataRow["Zipcode"]))
+    helpers.click_label_text(page, "360 Media Direct")
+    helpers.click_label_text(page, "YES")
     sleep(1)
 
     submit_button = page.ele("tag:button@@id=btn-primary")

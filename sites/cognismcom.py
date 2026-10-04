@@ -59,92 +59,32 @@ def format_phone_number(number, country_code="+1"):
 
 def fill_input_data(page, dataRow) : 
     
-    page.wait.ele_displayed("tag:label@@for=dropdown-state-field")
-
+    # 2026-10-04 capture (Mine privacy form): country defaults to United
+    # States; state is a dropdown of full names; request type is a radio
+    # (#delete); job title / company / LinkedIn URL are REQUIRED business
+    # fields with random uuid ids, reached through their label text. We are
+    # not a business contact, so those get "Not applicable" and the listing
+    # URL when we have one.
+    helpers = __import__("lib.broker_helpers", fromlist=["mine_select_state", "mine_input_by_label", "click_label_text"])
+    page.wait.ele_displayed("tag:label@@for=dropdown-state-field", timeout=15)
     sleep(1)
+    helpers.mine_select_state(page, dataRow["State"])
+    helpers.click_label_text(page, "Delete my data")
 
-    state_select = page.ele("tag:label@@for=dropdown-state-field")
-    print(state_select)
-    state_select.click()
+    fName = dataRow["Name"].split()[0]
+    lName = dataRow["Name"].split()[-1]
 
-    sleep(1)
+    def _type(el, val):
+        el.clear(); el.click(); sleep(random.uniform(0.1, 0.4)); _human_type2(el, val)
 
-    li_element = page.ele(f"tag:li@@data-label={dataRow["State"]}")
-    print(li_element)
-    li_element.click()
-
-    sleep(1)
-
-    delete_btn = page.ele("tag:p@@text()=Deletion of personal data")
-    delete_btn.click()
-
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-
-    fName_input = page.ele("tag:input@@id=fname-field")
-    fName_input.clear()
-    fName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
-    
-
-    lName_input = page.ele("tag:input@@id=lname-field")
-    lName_input.clear()
-    lName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    email_input = page.ele("tag:input@@id=email-field")
-    email_input.clear()
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
-
-    job_input = page.ele("tag:input@@id=Job Title")
-    job_input.clear()
-    job_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(job_input, "-")
-
-    company_input = page.ele("tag:input@@id=Company Name ")
-    company_input.clear()
-    company_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(company_input, "Company")
-
-    address_input = page.ele("tag:input@@id=Company Address (City)")
-    address_input.clear()
-    address_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
-
-    phone_input = page.ele("tag:input@@id=mobile-number-field")
-    phone_input.clear()
-    phone_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, format_phone_number(dataRow["Phone Number"]))
-
-    linked_input = page.ele("tag:input@@id=Adding your Linkedin profile URL to this form will expedite the DSR process")
-    linked_input.clear()
-    linked_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(linked_input, "-")
-
-    another_name_input = page.ele("tag:input@@id=If you have been known by any other name, please include it below")
-    another_name_input.clear()
-    another_name_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(another_name_input, "-")
-
-    confirm_check = page.ele("tag:label@@for=custom-question-4-0")
-    confirm_check.click()
+    _type(page.ele("tag:input@@id=fname-field"), fName)
+    _type(page.ele("tag:input@@id=lname-field"), lName)
+    _type(page.ele("tag:input@@id=email-field"), generate_email(dataRow["Name"]))
+    _type(helpers.mine_input_by_label(page, "Job Title"), "Not applicable - consumer request")
+    _type(helpers.mine_input_by_label(page, "Company Name"), "Not applicable - consumer request")
+    phone = (dataRow.get("Phone Number") or "").strip()
+    _type(page.ele("tag:input@@id=mobile-number-field"), format_phone_number(phone) if phone else "Not provided")
+    _type(page.ele("tag:input@@id=url-field"), (dataRow.get("Profile URL") or "").strip() or "Not applicable - consumer request")
 
     submit_button = page.ele("tag:button@@id=btn-primary")
     submit_button.click()

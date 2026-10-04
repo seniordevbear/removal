@@ -83,6 +83,9 @@ def fill_input_data(page, dataRow) :
     _human_type2(phone_input, generate_phone_number())
 
 def limeleadscom(dataRow, website_name, in_user_email, run_mode) : 
+    # 2026-10-04: NotImplementedError -> manage.py parks the row as step 4
+    # ("no automation") instead of crashing on it every day.
+    raise NotImplementedError("limeleadscom: limeleads.com/do-not-sell-my-data-request/ returns 'Site Not Configured | 404' (captured 2026-10-04)")
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name

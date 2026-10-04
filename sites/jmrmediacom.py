@@ -50,32 +50,22 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
-    iframe_container = page.ele("tag:iframe@@id=iframe-03")
-
-    iframe_container1 = iframe_container.ele("tag:iframe")
-
-    fName_input = iframe_container1.ele("tag:input@@aria-labelledby=i1 i4")
-    print(fName_input)
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
-
-    lName_input = iframe_container1.ele("tag:input@@aria-labelledby=i6 i9")
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    zip_input = iframe_container1.ele("tag:input@@aria-labelledby=i11 i14")
-    zip_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
-
+    # 2026-10-04 capture: the embedded Google Form is gone; the page now has
+    # a plain form named "donotsell" with firstName / lastName / email (a
+    # hidden duplicate exists for the form backend, so match the visible one).
+    def _box(name):
+        el = page.ele("css:form:not([hidden]) input[name=%s]" % name, timeout=6) or page.ele("tag:input@@name=" + name)
+        if not el:
+            raise RuntimeError("jmrmediacom: no %s box on the do-not-sell form" % name)
+        el.click()
+        sleep(random.uniform(0.1, 0.4))
+        return el
+    _human_type2(_box("firstName"), fName)
+    _human_type2(_box("lastName"), lName)
+    _human_type2(_box("email"), generate_email(dataRow["Name"]))
     sleep(random.uniform(0.5, 1))
-
-    submit_button = iframe_container1.ele("tag:div@@aria-label=Submit")
+    submit_button = page.ele("css:form:not([hidden]) button[type=submit], form:not([hidden]) input[type=submit]", timeout=3) \
+        or page.ele("xpath://form[@name='donotsell']//button | //button[contains(.,'Submit')]")
     submit_button.click()
 
 def jmrmediacom(dataRow, website_name, in_user_email, run_mode) : 

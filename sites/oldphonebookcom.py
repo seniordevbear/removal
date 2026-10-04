@@ -69,6 +69,9 @@ def fill_input_data(page, dataRow) :
     _human_type2(state_input, __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
 
 def oldphonebookcom(dataRow, website_name, in_user_email, run_mode) : 
+    # 2026-10-04: NotImplementedError -> manage.py parks the row as step 4
+    # ("no automation") instead of crashing on it every day.
+    raise NotImplementedError("oldphonebookcom: oldphonebook.com is a parked domain for sale (GoDaddy lander, captured 2026-10-04); the directory is gone")
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name

@@ -1340,3 +1340,47 @@ def wait_text(page, needles, timeout=10):
                 return n
         sleep(0.5)
     return None
+
+
+def mine_input_by_label(page, label_text, timeout=4):
+    """Mine/saymine privacy forms (cognism, mediadirect) give custom fields a
+    random uuid id; the <label for=uuid> text is the only stable handle."""
+    lab = page.ele("xpath://label[contains(normalize-space(.), %r)]" % label_text, timeout=timeout)
+    if not lab:
+        raise RuntimeError("no field labelled %r on this form" % label_text)
+    fid = lab.attr("for")
+    el = page.ele("tag:input@@id=" + fid, timeout=2) if fid else None
+    if not el:
+        raise RuntimeError("label %r has no input" % label_text)
+    return el
+
+
+def click_label_text(page, text, timeout=4):
+    """Click the <label> whose text contains `text` (radio/checkbox rows that
+    carry no usable id)."""
+    lab = page.ele("xpath://label[contains(normalize-space(.), %r)]" % text, timeout=timeout)
+    if not lab:
+        raise RuntimeError("no label containing %r" % text)
+    try:
+        lab.click()
+    except Exception:
+        lab.click(by_js=True)
+    return True
+
+
+def mine_select_state(page, raw):
+    """Mine dropdowns: click the state label, then the <li data-label=Full Name>."""
+    from time import sleep
+    full = _state_full_name(raw) or (raw or "").strip()
+    if not full:
+        raise missing_pii("State")
+    lab = page.ele("tag:label@@for=dropdown-state-field", timeout=6)
+    if not lab:
+        raise RuntimeError("state dropdown not on this form")
+    lab.click()
+    sleep(0.8)
+    li = page.ele("tag:li@@data-label=" + full, timeout=3)
+    if not li:
+        raise RuntimeError("no state option %r in the dropdown" % full)
+    li.click()
+    sleep(0.4)
