@@ -1,7 +1,7 @@
 From 58ac711f9afd0a14fb72fe1c95fe2cecb7084915 Mon Sep 17 00:00:00 2001
 From: max994-dev <bmax994@outlook.com>
 Date: Fri, 18 Sep 2026 19:14:20 +0000
-Subject: [PATCH 1/6] Shared scan runner; profile URL in CCPA emails; more
+Subject: [PATCH 01/10] Shared scan runner; profile URL in CCPA emails; more
  user_age adopters
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

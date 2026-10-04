@@ -1,0 +1,31 @@
+From 6aafd6c4ea39beba8c4c2527ed00b14c6723bd79 Mon Sep 17 00:00:00 2001
+From: max994-dev <bmax994@outlook.com>
+Date: Sat, 3 Oct 2026 20:17:16 +0000
+Subject: [PATCH 07/10] =?UTF-8?q?Ignore=20patches/=20=E2=80=94=20VPS=20upd?=
+ =?UTF-8?q?ate=20bundles=20are=20not=20source?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+git format-patch output staged for hand-application on the Windows VPS
+(the pipeline there is not a git clone). Same reasoning as capture_forms/:
+generated artefacts, regenerable from the commits they came from.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ .gitignore | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/.gitignore b/.gitignore
+index b6785f7..58b1f67 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -61,3 +61,5 @@ pkgs.txt
+ 
+ # output of capture_forms.py (page dumps of broker opt-out forms)
+ capture_forms/
++# patch bundles for the VPS (not source)
++patches/
+-- 
+2.43.0
+

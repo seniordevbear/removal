@@ -1,7 +1,7 @@
 From 62bbb410e7e3238ae9b79a3bd1bda801edf89e32 Mon Sep 17 00:00:00 2001
 From: max994-dev <bmax994@outlook.com>
 Date: Sat, 3 Oct 2026 14:19:41 +0000
-Subject: [PATCH 5/6] Pipeline: retry transient DOM errors, quarantine dead
+Subject: [PATCH 05/10] Pipeline: retry transient DOM errors, quarantine dead
  brokers, log successes, DB retry, scan empty-name
 
 From the 24 Sep - 2 Oct daily logs (~240k lines):
