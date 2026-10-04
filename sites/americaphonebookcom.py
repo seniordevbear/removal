@@ -46,22 +46,37 @@ def make_standard_num(num) :
     return ret
 
 def fill_input_data(page, dataRow) : 
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-    sleep(1)
+    # 2026-10-04 survey: contact.php no longer has a removal form. The site
+    # says "CLICK REMOVE NEXT TO THE LISTING YOU WANT REMOVED": reverse-search
+    # the phone number, then click the Remove link beside the listing.
+    import re as _re
+    helpers = __import__("lib.broker_helpers", fromlist=["missing_pii", "log_step"])
+    phone = _re.sub(r"\D", "", dataRow.get("Phone Number") or "")
+    if len(phone) == 11 and phone.startswith("1"):
+        phone = phone[1:]
+    if len(phone) != 10:
+        raise helpers.missing_pii("Phone Number")
 
+    page.get("http://americaphonebook.com/")
+    sleep(random.uniform(1, 2))
     phone_input = page.ele("tag:input@@name=number")
     phone_input.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, dataRow["Phone Number"])
+    _human_type2(phone_input, phone)
+    search_form = page.ele("tag:form@@name=searchform2")
+    search_form.ele("tag:input@@type=submit").click()
+    sleep(3)
 
-    zip_input = page.ele("tag:input@@name=zip")
-    zip_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
+    if "no match in our free White Pages database" in (page.html or ""):
+        helpers.log_step("americaphonebookcom", "number not listed; nothing to remove")
+        return "not_listed"
 
-    submit_button = page.ele("tag:input@@value=Request Removal")
-    submit_button.click()
+    remove_link = page.ele("tag:a@@text():Remove", timeout=5) or page.ele("tag:a@@href:remov", timeout=2)
+    if not remove_link:
+        raise RuntimeError("americaphonebookcom: listing page has no Remove link (layout changed)")
+    remove_link.click()
+    sleep(3)
+    return "removed"
 
 def americaphonebookcom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
@@ -88,11 +103,6 @@ def americaphonebookcom(dataRow, website_name, in_user_email, run_mode) :
         
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        page.get("http://americaphonebook.com/contact.php")
-
-        sleep(random.uniform(1, 2))
-
-        #Wait until captcha is solved
         fill_input_data(page, dataRow)
 
         try :

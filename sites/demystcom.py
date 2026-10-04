@@ -135,15 +135,20 @@ def demystcom(dataRow, website_name, in_user_email, run_mode) :
 
         fill_input_data(page, dataRow)
 
+        # 2026-10-04: the reCAPTCHA widget (react-google-recaptcha, key
+        # 6Lcfo1oa...) is only mounted AFTER the first Submit click. The old
+        # flow refreshed the page right after that click, which unmounted it
+        # again, so 24/27 runs waited for an iframe that never came back.
         submit_button = page.ele("tag:button@@text()=Submit")
         submit_button.click()
-
-        page.refresh()
-        sleep(1)
-
-        fill_input_data(page, dataRow)
-
-        page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA")
+        sleep(2)
+        if not page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA", timeout=12):
+            helpers = __import__("lib.broker_helpers", fromlist=["wait_text"])
+            if helpers.wait_text(page, ["Your form has been sent successfully"], timeout=5):
+                sleep(2)
+                page.get_screenshot(screenshot_save_path)
+                return screenshot_save_path
+            raise RuntimeError("demystcom: no captcha and no success message after Submit")
         sleep(1)
         iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
         rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
@@ -187,6 +192,11 @@ def demystcom(dataRow, website_name, in_user_email, run_mode) :
         
         submit_button = page.ele("tag:button@@text()=Submit")
         submit_button.click()
+
+        helpers = __import__("lib.broker_helpers", fromlist=["wait_text"])
+        if not helpers.wait_text(page, ["Your form has been sent successfully"], timeout=15):
+            page.get_screenshot(screenshot_save_path)
+            raise RuntimeError("demystcom: form did not confirm after captcha + Submit")
 
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)

@@ -46,12 +46,19 @@ def faradayio(dataRow, website_name, in_user_email, run_mode):
         _ENTRIES["type"]: "Data Deletion",
         _ENTRIES["who"]: "Consumer",
     }
-    for key, field in (("dob", dob),
-                       ("address", dataRow.get("Address") or ""),
+    for key, field in (("address", dataRow.get("Address") or ""),
                        ("city", dataRow.get("City") or ""),
                        ("state", dataRow.get("State") or "")):
         if field:
             payload[_ENTRIES[key]] = field
+    # 2026-10-04: a Google Forms date question is posted as three fields
+    # (entry.N_year / _month / _day, confirmed on the live form). Sending one
+    # "M/D/YYYY" string under entry.N is what produced HTTP 400 on all 26
+    # runs that had a birth date.
+    if dob:
+        payload[_ENTRIES["dob"] + "_year"] = str(dataRow["Birth Year"])
+        payload[_ENTRIES["dob"] + "_month"] = str(int(dataRow["Birth Month"]))
+        payload[_ENTRIES["dob"] + "_day"] = str(int(dataRow["Birth Day"]))
 
     log_step(broker, "POST google form (data deletion) for %s %s" % (first, last))
     resp = requests.post(_URL, data=payload, timeout=30, headers={

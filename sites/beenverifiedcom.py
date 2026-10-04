@@ -56,29 +56,28 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
-    request_type = page.ele("tag:div@@id=requestType")
-    request_type.click()
-    sleep(random.uniform(0.5, 1))
-    div_select = page.ele("tag:div@@id=select-options-container")
-    # print(div_select)
-    delete_li = div_select.ele("tag:li@@text()=Delete My Information")
-    
-    delete_li.click()
-    sleep(random.uniform(0.5, 1))
-    div_modal = page.ele("tag:div@@class:MuiDialogContent-root")
-    #print(div_modal)
-    yes_button = div_modal.ele("tag:h6@@text()=Yes, I do")
-    yes_button.click()
-    sleep(random.uniform(0.5, 1))
-    continue_button = div_modal.ele("tag:button@@type=submit")
-    continue_button.click()
+    # 2026-10-04 survey: the request-type picker and the "Do you have an
+    # account?" question are now native <select>s (#requestType,
+    # #account_type_select); the MUI modal with the "Yes, I do" <h6> is gone,
+    # which is where all 26 runs died. We answer "No, I do not" (guest) —
+    # these customers are not members — and confirm the "continue with
+    # Delete?" dialog when it appears. Age is a new required field.
+    helpers = __import__("lib.broker_helpers", fromlist=["select_state", "missing_pii"])
+    form_container = page.ele("tag:form@@id=comprehensive-form", timeout=10)
+
+    request_type = form_container.ele("tag:select@@id=requestType")
+    request_type.select.by_value("rtd")
     sleep(random.uniform(0.5, 1))
 
-    form_container = page.ele("tag:form@@id=comprehensive-form")
-    member_input = form_container.ele("tag:input@@placeholder=Membership ID")
-    member_input.clear()
-    member_input.click()
-    _human_type2(member_input, "1")
+    account_type = form_container.ele("tag:select@@id=account_type_select", timeout=4)
+    if account_type:
+        account_type.select.by_value("guest")
+        sleep(random.uniform(0.5, 1))
+
+    yes_button = page.ele("tag:button@@aria-label=delete-information-yes-button", timeout=3)
+    if yes_button and yes_button.states.is_displayed:
+        yes_button.click()
+        sleep(random.uniform(0.5, 1))
 
     first_name = form_container.ele("tag:input@@id=fname")
     first_name.clear()
@@ -95,6 +94,16 @@ def fill_input_data(page, dataRow) :
     email_input.click()
     _human_type2(email_input, generate_email(dataRow["Name"]))
 
+    age = str(dataRow.get("Age") or "").strip()
+    if not age and str(dataRow.get("Birth Year") or "").strip().isdigit():
+        age = str(datetime.date.today().year - int(dataRow["Birth Year"]))
+    age_input = form_container.ele("tag:input@@id=age", timeout=3)
+    if age_input:
+        if not age:
+            raise helpers.missing_pii("Age")
+        age_input.clear()
+        age_input.click()
+        _human_type2(age_input, age)
 
     street_input = form_container.ele("tag:input@@id=street")
     street_input.clear()
@@ -106,12 +115,8 @@ def fill_input_data(page, dataRow) :
     city_input.click()
     _human_type2(city_input, dataRow["City"])
 
-    state_input = form_container.ele("tag:input@@name=state")
-    state_input.click()
-    modal_container = page.ele("tag:div@@class:MuiPaper-root")
-
-    state_li = modal_container.ele(f"tag:li@@text()={__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"])}")
-    state_li.click()
+    state_select = form_container.ele("tag:select@@id=state")
+    helpers.select_state(state_select, dataRow["State"])
 
     zip_input = form_container.ele("tag:input@@id=zip")
     zip_input.clear()
@@ -160,27 +165,18 @@ def beenverifiedcom(dataRow, website_name, in_user_email, run_mode) :
         except Exception as e:
             print(e)
 
-        captchaResponse_element = page.ele("tag:input@@name=captchaResponse")
-        page.run_js("arguments[0].value = arguments[1];", captchaResponse_element, Code)
-
-        sleep(0.3)
-
-        captcha_widget_div = page.ele("tag:div@@id=captcha-widget")
-        print(captcha_widget_div)
-        div_element = captcha_widget_div.children()[0]
-        turnstile_response_element = div_element.ele("tag:input@@name=cf-turnstile-response")
-        page.run_js("arguments[0].value = arguments[1];", turnstile_response_element, Code)
+        __import__("lib.broker_helpers", fromlist=["set_turnstile_response"]).set_turnstile_response(page, Code)
 
         sleep(1)
 
         form_container = page.ele("tag:form@@id=comprehensive-form")
-        submit_button = form_container.ele("tag:button@@type=submit")
+        submit_button = form_container.ele("tag:button@@aria-label=continue-button", timeout=3) \
+            or form_container.ele("tag:button@@type=submit")
         submit_button.click()
-        sleep(random.uniform(0.5, 1))
-        div_modal = page.ele("tag:div@@class:MuiPaper-root")
-        yes_button = div_modal.ele("tag:button@@aria-label=delete-information-yes-button")
-        print(yes_button)
-        yes_button.click()
+        sleep(random.uniform(1, 2))
+        yes_button = page.ele("tag:button@@aria-label=delete-information-yes-button", timeout=4)
+        if yes_button and yes_button.states.is_displayed:
+            yes_button.click()
 
         
         try :

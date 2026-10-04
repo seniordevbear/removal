@@ -51,29 +51,17 @@ def make_standard_num(num) :
     return ret
 
 def fill_input_data(page, dataRow) : 
-    
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-
-    fullName_input = page.ele("tag:input@@name=name")
-    fullName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fullName_input, dataRow["Name"])
-
+    # 2026-10-04 survey: /optout is now a single e-mail box guarded by
+    # Cloudflare Turnstile; ContactOut e-mails a verification link and deletes
+    # the profile once it is clicked. The old name/profile_url boxes are gone
+    # (0/28 runs got past them).
     email_str = generate_email(dataRow["Name"])
-    email_input = page.ele("tag:input@@name=email")
+    email_input = page.ele("tag:input@@id=email", timeout=8) or page.ele("tag:input@@name=email")
     email_input.click()
     print("typing the email...")
     sleep(random.uniform(0.1,0.5))
     _human_type2(email_input, email_str)
-
-    url_str = "https://contactout.com/" + fName + "-" + lName
-    url_input = page.ele("tag:input@@name=profile_url")
-    url_input.click()
-    print("typing the url...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(url_input, url_str)
+    return email_str
 
     
 def contactoutcom(dataRow, website_name, in_user_email, run_mode) : 
@@ -106,28 +94,28 @@ def contactoutcom(dataRow, website_name, in_user_email, run_mode) :
 
         sleep(random.uniform(1, 2))       
 
-        fill_input_data(page, dataRow)
+        email_str = fill_input_data(page, dataRow)
 
         apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
         solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            site_key = "6LcHQhQUAAAAAPP2SaMKDQJ5IhkNdh6wIwIZZqzF"
-            site_url = page.url
-            result = solver.recaptcha(site_key, site_url)
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            pass
-
-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
-        textarea_token.set.innerHTML(Code)
-
+        print("Turnstile is solving...")
+        result = solver.turnstile(sitekey="0x4AAAAAACEI83yYiz9fKLVM", url="https://contactout.com/optout")
+        Code = result["code"]
+        __import__("lib.broker_helpers", fromlist=["set_turnstile_response"]).set_turnstile_response(page, Code)
         sleep(1)
-        
-        submit_button = page.ele("tag:button@@text()=Submit")
+
+        submit_button = page.ele("tag:button@@text():Send verification link", timeout=3) \
+            or page.ele("tag:button@@type=submit")
         submit_button.click()
+        sleep(5)
+        page.get_screenshot(screenshot_save_path)
+
+        # The removal only happens when the link in their e-mail is opened.
+        from lib.email_verification import do_email_verification
+        try:
+            do_email_verification("contactout", screenshot_save_path)
+        except Exception as e:
+            raise RuntimeError("contactoutcom: verification link sent to %s but not confirmed: %s" % (email_str, e))
 
 
         try :

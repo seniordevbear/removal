@@ -7,7 +7,7 @@ import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
 from cloudsolver.extension import proxies
-from lib.broker_helpers import select_onetrust_state
+from lib.broker_helpers import select_onetrust_state, select_onetrust_country
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -98,6 +98,10 @@ def fill_input_data(page, dataRow) :
     sleep(random.uniform(0.1,0.5))
     _human_type2(city_input, dataRow["City"])
 
+    # 2026-10-04: the form moved to omnicom-privacy.my.onetrust.com and now
+    # has a required Country field that gates the State list (0/81 passed
+    # this point in the 24 Sep-2 Oct logs). Country first, then state.
+    select_onetrust_country(page)
     state_select = page.ele("tag:input@@id=stateDSARElement")
     state_select.click()
     sleep(random.uniform(0.1,0.5))
@@ -107,6 +111,13 @@ def fill_input_data(page, dataRow) :
     zip_input.click()
     sleep(random.uniform(0.1,0.5))
     _human_type2(zip_input, str(dataRow["Zipcode"]))
+
+    # Phone Number is required on the new form.
+    phone_input = page.ele("tag:input@@id=phoneNumberDSARElement", timeout=3)
+    if phone_input:
+        phone_input.click()
+        sleep(random.uniform(0.1,0.5))
+        _human_type2(phone_input, (dataRow.get("Phone Number") or "").strip() or generate_phone_number())
 
     return email_address
 
@@ -164,7 +175,7 @@ def acxiomcom(dataRow, website_name, in_user_email, run_mode) :
         # ac = Actions(page)
 
         main_tab = page.latest_tab
-        main_tab.get("https://privacyportal.onetrust.com/webform/342ca6ac-4177-4827-b61e-19070296cbd3/7229a09c-578f-4ac6-a987-e0428a7b877e")
+        main_tab.get("https://omnicom-privacy.my.onetrust.com/webform/c0a325be-6f68-46be-a0de-e4a750890f7d/257a5cb1-b4b6-4ff1-bb7a-687c056fac91")
 
         sleep(random.uniform(1, 2))
         

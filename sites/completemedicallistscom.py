@@ -74,6 +74,7 @@ def fill_input_data(page, dataRow) :
     _human_type2(city_input, dataRow["City"])
 
     state_input = page.ele("tag:input@@name=U3RhdGU=")
+    state_input.clear()   # 2026-10-04: field now pre-filled with "CA"
     state_input.click()
     sleep(random.uniform(0.1,0.5))
     _human_type2(state_input, __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))    
@@ -89,8 +90,15 @@ def fill_input_data(page, dataRow) :
     sleep(random.uniform(0.1,0.5))
     _human_type2(email_input, generate_email(dataRow["Name"]))    
 
-    confirm_checkbox = page.ele("tag:input@@name=aHVtYW4=")
-    confirm_checkbox.click()
+    # 2026-10-04 survey: the "human" checkbox (name=aHVtYW4=) is gone — the
+    # form now has reCAPTCHA plus five honeypot inputs (ERA/FIP/BABIP/OPS/
+    # SLG) that must stay EMPTY. Pick the "Remove" request radio instead.
+    remove_radio = page.ele("tag:input@@name=ins@@value=Remove", timeout=3)
+    if remove_radio:
+        remove_radio.click(by_js=True)
+    confirm_checkbox = page.ele("tag:input@@name=aHVtYW4=", timeout=1)
+    if confirm_checkbox:
+        confirm_checkbox.click()
 
     
 def completemedicallistscom(dataRow, website_name, in_user_email, run_mode) : 
@@ -156,16 +164,18 @@ def completemedicallistscom(dataRow, website_name, in_user_email, run_mode) :
 
         sleep(1)
 
-        signature_input = page.ele("tag:input@@name=Signature")
-        signature_input.click()
-        sleep(random.uniform(0.1,0.5))
-        _human_type2(signature_input, dataRow["Name"])    
-
-        human_checkbox = page.ele("tag:input@@name=human")
-        human_checkbox.click()
-
-        submit_button1 = page.ele("tag:input@@value=Submit")
-        submit_button1.click()
+        # Second "signature" step: present on the old flow, absent in the
+        # 2026-10-04 capture. Do it only if the page shows it.
+        signature_input = page.ele("tag:input@@name=Signature", timeout=4)
+        if signature_input:
+            signature_input.click()
+            sleep(random.uniform(0.1,0.5))
+            _human_type2(signature_input, dataRow["Name"])
+            human_checkbox = page.ele("tag:input@@name=human", timeout=2)
+            if human_checkbox:
+                human_checkbox.click()
+            submit_button1 = page.ele("tag:input@@value=Submit")
+            submit_button1.click()
 
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)

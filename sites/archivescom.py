@@ -66,28 +66,45 @@ def fill_input_data(page, dataRow) :
     sleep(random.uniform(0.1,0.5))
     _human_type2(lName_input, lName)
     
-    address_input = page.ele("tag:input@@id=OptoutAddress")
+    # 2026-10-04 survey: the separate address/city/state/zip boxes were
+    # replaced by ONE autocomplete box (#OptoutAddress1Display, suggestions
+    # from OpenStreetMap) that fills a hidden #OptoutAddress1 the server
+    # validates. 0/75 runs got past the old #OptoutAddress. Type the full
+    # address, take the first suggestion, and if none comes back set the
+    # hidden field to what we typed so the form still submits.
+    state_code = __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"])
+    full_addr = ", ".join(x for x in (
+        (dataRow.get("Address") or dataRow.get("Street") or "").strip(),
+        (dataRow.get("City") or "").strip(),
+        " ".join(y for y in (state_code or "", str(dataRow.get("Zipcode") or "").strip()) if y),
+    ) if x)
+    address_input = page.ele("tag:input@@id=OptoutAddress1Display")
     address_input.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
+    _human_type2(address_input, full_addr)
+    sleep(3)
+    picked = False
+    try:
+        suggestion = page.ele("css:#OptoutAddress1SuggestionsList li", timeout=5)
+        if suggestion:
+            suggestion.click()
+            picked = True
+            sleep(0.5)
+    except Exception:
+        picked = False
+    if not picked:
+        page.run_js(
+            "var h=document.getElementById('OptoutAddress1');"
+            "h.value=arguments[0];"
+            "h.dispatchEvent(new Event('input',{bubbles:true}));"
+            "h.dispatchEvent(new Event('change',{bubbles:true}));", full_addr)
 
-    city_input = page.ele("tag:input@@id=OptoutCity")
-    city_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(city_input, dataRow["City"])
-    
-    state_select = page.ele("tag:select@@id=OptoutRegion")
-    state_select.select.by_value(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
-    
-    zip_input = page.ele("tag:input@@id=OptoutPostalCode")
-    zip_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
-
-    phone_input = page.ele("tag:input@@id=OptoutPhoneNumber")
-    phone_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, format_phone_number(dataRow["Phone Number"]))
+    phone_raw = (dataRow.get("Phone Number") or "").strip()
+    if phone_raw:
+        phone_input = page.ele("tag:input@@id=OptoutPhoneNumber")
+        phone_input.click()
+        sleep(random.uniform(0.1,0.5))
+        _human_type2(phone_input, format_phone_number(phone_raw))
 
     email_str = generate_email(dataRow["Name"])
     email_input = page.ele("tag:input@@id=OptoutEmail")

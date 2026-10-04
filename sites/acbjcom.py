@@ -110,6 +110,9 @@ def fill_input_data(page, dataRow) :
     _human_type2(zip_input, str(dataRow["Zipcode"]))
 
 def acbjcom(dataRow, website_name, in_user_email, run_mode) : 
+    # 2026-10-04: NotImplementedError -> manage.py parks the row as step 4
+    # ("no automation") instead of retrying a dead site every day.
+    raise NotImplementedError("acbjcom: ACBJ's OneTrust webform 161633e1-.../a87fe61a-... returns 'The requested content is no longer available' (captured 2026-10-04) and acbj.com blocks server fetches; needs a browser survey for the new privacy-request link")
     page = None
     
     try : 

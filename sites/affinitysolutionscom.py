@@ -6,7 +6,7 @@ import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
 from cloudsolver.extension import proxies
-from lib.broker_helpers import select_onetrust_state
+from lib.broker_helpers import select_onetrust_state, select_onetrust_country, solve_image_captcha_element
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -73,6 +73,8 @@ def fill_input_data(page, dataRow) :
     sleep(random.uniform(0.1,0.5))
     _human_type2(city_input, dataRow["City"])
 
+    # 2026-10-04: required Country autocomplete now gates the State list.
+    select_onetrust_country(page)
     state_select = page.ele("tag:input@@id=stateDSARElement")
     state_select.click()
     sleep(random.uniform(0.1,0.5))
@@ -107,13 +109,16 @@ def fill_input_data(page, dataRow) :
     phone_input.click()
     print("typing the email...")
     sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, dataRow["Phone Number"])
+    _human_type2(phone_input, (dataRow.get("Phone Number") or "").strip() or generate_phone_number())
 
-    birth_date = make_standard_num(dataRow["Birth Month"]) + "/" + make_standard_num(dataRow["Birth Day"]) + "/" + make_standard_num(dataRow["Birth Year"])
-    birth_input = page.ele("tag:input@@id=dateOfBirthDSARElement")
-    birth_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(birth_input, birth_date)
+    # Date of birth was dropped from the form (2026-10-04 capture); fill it
+    # only if it comes back.
+    birth_input = page.ele("tag:input@@id=dateOfBirthDSARElement", timeout=2)
+    if birth_input and dataRow.get("Birth Year"):
+        birth_date = make_standard_num(dataRow["Birth Month"]) + "/" + make_standard_num(dataRow["Birth Day"]) + "/" + make_standard_num(dataRow["Birth Year"])
+        birth_input.click()
+        sleep(random.uniform(0.1,0.5))
+        _human_type2(birth_input, birth_date)
 
     
 
@@ -174,48 +179,16 @@ def affinitysolutionscom(dataRow, website_name, in_user_email, run_mode) :
 
         fill_input_data(page, dataRow)
 
-        page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA")
+        # 2026-10-04: the form swapped reCAPTCHA for a BotDetect image captcha
+        # (#angularBasicCaptcha_CaptchaImage -> #captchaCode).
         sleep(1)
-        
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
-        print(rc_anchor_container)
-        rc_anchor_container.click()
-
-        sleep(2)
-        page.wait.ele_displayed("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        sleep(1)
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        audio_button = iframe_container1.ele("tag:button@@id=recaptcha-audio-button")
-
-        print(audio_button)
-        audio_button.click()
-        audio_source = iframe_container1.ele("tag:audio@@id=audio-source").attr("src")
-        print(audio_source)
-
-        response = requests.get(audio_source)
-        with open(("__downloaded_%d.mp3" % __import__("threading").get_ident()), "wb") as file:
-            file.write(response.content)
-
-        sleep(1)
-
-        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
-        solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            result = solver.audio(("__downloaded_%d.mp3" % __import__("threading").get_ident()), lang="en")
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            print("Error: ", str(e))
-        audio_reponse_input = iframe_container1.ele("tag:input@@id=audio-response")
-        _human_type2(audio_reponse_input, Code)
-
-        verify_btn = iframe_container1.ele("tag:button@@id=recaptcha-verify-button")
-        verify_btn.click()
-
-        sleep(5)
+        captcha_img = page.ele("tag:img@@id=angularBasicCaptcha_CaptchaImage", timeout=8)
+        if captcha_img:
+            code = solve_image_captcha_element(page, captcha_img, "affinitysolutionscom")
+            captcha_input = page.ele("tag:input@@id=captchaCode")
+            captcha_input.click()
+            _human_type2(captcha_input, code)
+            sleep(0.5)
 
         submit_button = page.ele("tag:button@@id=dsar-webform-submit-button")
         submit_button.click()

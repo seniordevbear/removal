@@ -58,6 +58,15 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
+    # 2026-10-04 survey: privacy.deepsync.com rebuilt the form. Fields are now
+    # first_name / last_name / emails[] / phone_numbers[] / address[] /
+    # city[] / state[] / zip[] (ids *_ctx1 for the first row), a "Who is
+    # this request for?" radio and a requests[] checkbox list. Turnstile and
+    # #submit_button are unchanged. 0/105 runs got past the old #who_address.
+    who = page.ele("tag:input@@name=request_type@@value=opt_out", timeout=5)
+    if who:
+        who.click(by_js=True)
+
     first_name = page.ele("tag:input@@id=first_name")
     first_name.clear()
     first_name.click()
@@ -68,37 +77,40 @@ def fill_input_data(page, dataRow) :
     last_name.click()
     _human_type2(last_name, lName)
 
-    email_input = page.ele("tag:input@@name=email")
+    email_input = page.ele("tag:input@@id=email_ctx1")
     email_input.clear()
     email_input.click()
     _human_type2(email_input, generate_email(dataRow["Name"]))
 
-    phone_input = page.ele("tag:input@@name=phone")
-    phone_input.clear()
-    phone_input.click()
-    _human_type2(phone_input, generate_phone_number())
+    phone_input = page.ele("tag:input@@id=phone_ctx1", timeout=2)
+    if phone_input:
+        phone_input.clear()
+        phone_input.click()
+        _human_type2(phone_input, (dataRow.get("Phone Number") or "").strip() or generate_phone_number())
 
-
-    street_input = page.ele("tag:input@@id=who_address")
+    street_input = page.ele("tag:input@@id=who_address_ctx1")
     street_input.clear()
     street_input.click()
     _human_type2(street_input, dataRow["Address"])
 
-    city_input = page.ele("tag:input@@id=who_city")
+    city_input = page.ele("tag:input@@id=who_city_ctx1")
     city_input.clear()
     city_input.click()
     _human_type2(city_input, dataRow["City"])
 
-    state_select = page.ele("tag:select@@id=who_state")
+    state_select = page.ele("tag:select@@id=who_state_ctx1")
     __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
-    zip_input = page.ele("tag:input@@id=who_zip")
+    zip_input = page.ele("tag:input@@id=who_zip_ctx1")
     zip_input.clear()
     zip_input.click()
     _human_type2(zip_input, str(dataRow["Zipcode"]))
 
-    checkbox_element = page.ele("tag:input@@id=request_type_5")
-    checkbox_element.set.attr("checked", True)
+    # "Do not sell or share" + "Please delete my personal information".
+    for cb_id in ("request_type_1", "request_type_5"):
+        cb = page.ele("tag:input@@id=" + cb_id, timeout=2)
+        if cb and not cb.states.is_checked:
+            cb.click(by_js=True)
 
 def accudatacom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
@@ -146,11 +158,7 @@ def accudatacom(dataRow, website_name, in_user_email, run_mode) :
         
         sleep(0.3)
 
-        captcha_widget_div = page.ele("tag:div@@data-theme=light")
-        print(captcha_widget_div)
-        div_element = captcha_widget_div.children()[0]
-        turnstile_response_element = div_element.ele("tag:input@@name=cf-turnstile-response")
-        page.run_js("arguments[0].value = arguments[1];", turnstile_response_element, Code)
+        __import__("lib.broker_helpers", fromlist=["set_turnstile_response"]).set_turnstile_response(page, Code)
 
         sleep(1)
 

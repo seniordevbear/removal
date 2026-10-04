@@ -115,30 +115,21 @@ def fmadatacom(dataRow, website_name, in_user_email, run_mode) :
 
         fill_input_data(page, dataRow)
 
+        # 2026-10-04 survey: fmadata switched from reCAPTCHA to hCaptcha
+        # (sitekey 1a8ac6e2-0f6c-4e30-b338-e29297cec7b0). 28/31 runs died
+        # looking for the reCAPTCHA iframe.
         apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
         solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            site_key = "6Leq_cwZAAAAACojZ2YS50R7-RzjBVkOMhWs3aEO"
-            site_url = "https://www.fmadata.com/opt-out-requests/new"
-            result = solver.recaptcha(site_key, site_url)
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            print("Error: ", str(e))
-
-
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        recaptcha_input_token = iframe_container.ele("tag:input@@id=recaptcha-token")
-        recaptcha_input_token.set.attr("value", Code)
-
-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
-        textarea_token.set.innerHTML(Code)
-
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        recaptcha_input_token1 = iframe_container1.ele("tag:input@@id=recaptcha-token")
-        recaptcha_input_token1.set.attr("value", Code)
+        print("hCaptcha is solving...")
+        site_key = "1a8ac6e2-0f6c-4e30-b338-e29297cec7b0"
+        site_url = "https://www.fmadata.com/opt-out-requests/new"
+        result = solver.hcaptcha(sitekey=site_key, url=site_url)
+        Code = result["code"]
+        page.run_js(
+            "var t=arguments[0];"
+            "document.querySelectorAll(\"textarea[name='h-captcha-response'],textarea[name='g-recaptcha-response']\")"
+            ".forEach(function(e){e.style.display='block';e.value=t;});", Code)
+        sleep(1)
 
         submit_button = page.ele("tag:input@@type=submit")
         submit_button.click()
