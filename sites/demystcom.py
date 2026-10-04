@@ -76,7 +76,7 @@ def fill_input_data(page, dataRow) :
     postal_input = page.ele("tag:input@@name=Postal code")
     postal_input.click()
     sleep(random.uniform(0.1,0.5))
-    _human_type2(postal_input, str(dataRow["Area Code"]))
+    _human_type2(postal_input, str(dataRow["Zipcode"]))  # 2026-10-04: was Area Code
     
     
     state_element = page.ele("tag:select@@name=State")
