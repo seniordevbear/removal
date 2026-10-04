@@ -98,49 +98,53 @@ def callersmartcom(dataRow, website_name, in_user_email, run_mode):
             else :
                 break
         
-        fullName_input = page.ele("tag:input@@id=userName")
-        fullName_input.click()
-        sleep(random.uniform(0.1, 0.5))
-        _human_type2(fullName_input, dataRow["Name"])
+        # 2026-10-04 capture: the "Do Not Sell My Personal Data" form is now
+        # e-mail + 10-digit phone number only ("Both fields are required";
+        # listings are keyed by phone number), reCAPTCHA 6Lc2sPQS..., a
+        # honeypot text box named specialData that must stay empty, and a
+        # Send button. They e-mail a confirmation link. 26/26 runs last week
+        # died on the old #userName box.
+        import re as _re
+        helpers = __import__("lib.broker_helpers", fromlist=["missing_pii"])
+        from lib.email_verification import do_email_verification
+        phone = _re.sub(r"\D", "", dataRow.get("Phone Number") or "")
+        if len(phone) == 11 and phone.startswith("1"):
+            phone = phone[1:]
+        if len(phone) != 10:
+            raise helpers.missing_pii("Phone Number")
 
-        email_input = page.ele("tag:input@@id=email")
+        form = page.ele("tag:form@@name=contactForm", timeout=10)
+        if not form:
+            raise RuntimeError("callersmartcom: opt-out form not found on /data (layout changed)")
+        email_str = generate_email(dataRow["Name"])
+        email_input = form.ele("tag:input@@name=email")
         email_input.click()
         sleep(random.uniform(0.1, 0.5))
-        _human_type2(email_input, dataRow["User Email"])
+        _human_type2(email_input, email_str)
 
-        message_textarea = page.ele("tag:textarea@@id=message")
-        message_textarea.click()
+        number_input = form.ele("tag:input@@name=number")
+        number_input.click()
         sleep(random.uniform(0.1, 0.5))
-        _human_type2(message_textarea, "I want to remove my info from your site.")
+        _human_type2(number_input, phone)
 
         apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
         solver = TwoCaptcha(apiKey)
         print("Captcha is solving...")
-        try :
-            site_key = "6Lc2sPQSAAAAAJP_kRsCsbiYkR4gb2fkk9XUGz2k"
-            site_url = "https://www.callersmart.com/data"
-            result = solver.recaptcha(site_key, site_url)
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            print("Error: ", str(e))
-
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        recaptcha_input_token = iframe_container.ele("tag:input@@id=recaptcha-token")
-        recaptcha_input_token.set.attr("value", Code)
-
-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
-        textarea_token.set.innerHTML(Code)
-
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        recaptcha_input_token1 = iframe_container1.ele("tag:input@@id=recaptcha-token")
-        recaptcha_input_token1.set.attr("value", Code)
-
+        Code = solver.recaptcha("6Lc2sPQSAAAAAJP_kRsCsbiYkR4gb2fkk9XUGz2k", "https://www.callersmart.com/data")["code"]
+        page.run_js(
+            "var t=arguments[0];"
+            "document.querySelectorAll(\"textarea[name='g-recaptcha-response']\")"
+            ".forEach(function(e){e.style.display='block';e.value=t;});", Code)
         sleep(random.uniform(0.5, 1))
 
-        submit_btn = page.ele("tag:button@@ga-event-label=Send Button")
-        submit_btn.click()        
+        submit_btn = form.ele("tag:button@@type=submit")
+        submit_btn.click()
+        sleep(5)
+        page.get_screenshot(screenshot_save_path)
+
+        # the opt-out completes only when their e-mailed confirmation link is opened
+        if not do_email_verification("callersmart", screenshot_save_path):
+            raise RuntimeError("callersmartcom: opt-out requested for %s / %s but no confirmation e-mail link was found" % (email_str, phone))
 
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)
