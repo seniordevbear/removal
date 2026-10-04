@@ -55,11 +55,11 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
+    # 2026-10-04 round-5 capture: the OneTrust form is opened directly
+    # (privacyportal-eu-cdn.onetrust.com/dsarwebform/...), so every selector
+    # works at page level instead of through the ot-form-wrapper iframe.
     sleep(1)
-    div_container = page.ele("tag:div@@class=ot-form-wrapper")
-    print(div_container)
-    iframe_container = div_container.ele("tag:iframe")
-    print(iframe_container)
+    iframe_container = page
 
     request_man = iframe_container.ele("tag:span@@text()= Customer ")
     request_man.click()
@@ -85,20 +85,21 @@ def fill_input_data(page, dataRow) :
     sleep(random.uniform(0.1,0.5))
     _human_type2(email_input, generate_email(dataRow["Name"]))
 
-    country_select = iframe_container.ele("tag:input@@id=countryDSARElement")
-    country_select.click()
-    sleep(random.uniform(0.1,0.5))
-    iframe_container.ele("tag:vt-option@@text()= United States ").click()
-
-    state_select = iframe_container.ele("tag:input@@id=stateDSARElement")
-    state_select.click()
-    sleep(random.uniform(0.1,0.5))
-    select_onetrust_state(iframe_container, dataRow["State"])  # full-name/code tolerant (2026-09-24)
-
-    textarea_input = iframe_container.ele("tag:textarea@@id=undefined")
-    textarea_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(textarea_input, "I want to remove my info.")
+    # Country and State are optional autocompletes on this form.
+    helpers = __import__("lib.broker_helpers", fromlist=["select_onetrust_country", "select_onetrust_state"])
+    try:
+        helpers.select_onetrust_country(page)
+        state_select = page.ele("tag:input@@id=stateDSARElement", timeout=2)
+        if state_select:
+            state_select.click()
+            sleep(random.uniform(0.1,0.5))
+            helpers.select_onetrust_state(page, dataRow["State"])
+    except Exception as e:
+        print("mediawallah: country/state skipped:", e)
+    details = page.ele("tag:textarea@@id=requestDetailsDSARElement", timeout=2)
+    if details:
+        details.click()
+        _human_type2(details, "Please delete all of my personal information from your records.")
 
 def mediawallahcom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
@@ -147,7 +148,7 @@ def mediawallahcom(dataRow, website_name, in_user_email, run_mode) :
             options.headless()
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        page.get("https://mediawallah.com/donotsell/")
+        page.get("https://privacyportal-eu-cdn.onetrust.com/dsarwebform/e3df3040-c675-462f-99c4-15c05ac3bf5c/545897d5-7793-4317-921b-4efe187a2c02.html")
 
         sleep(random.uniform(1, 2))
 
@@ -155,9 +156,7 @@ def mediawallahcom(dataRow, website_name, in_user_email, run_mode) :
         max_number = 15
         i=0
 
-        div_container = page.ele("tag:div@@class=ot-form-wrapper")
-        print(div_container)
-        iframe_root_container = div_container.ele("tag:iframe")
+        iframe_root_container = page
 
         fill_input_data(page, dataRow)
 

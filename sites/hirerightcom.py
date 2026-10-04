@@ -52,8 +52,12 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
-    iframe_container = page.ele("tag:iframe@@id=iFrameResizer0")
-    form_container = iframe_container.ele("tag:form@@id=pardot-form")
+    # 2026-10-04 round-5 capture: the Pardot form is opened directly (it
+    # lived in an iframe); it gained an "I am:" select and shows a different
+    # checkbox group per state, so the delete box is found by its label.
+    form_container = page.ele("tag:form@@id=pardot-form", timeout=15)
+    if not form_container:
+        raise RuntimeError("hirerightcom: pardot form not found")
 
     request_type = form_container.ele("tag:input@@id=650513_163143pi_650513_163143_1128621_1128621")
     request_type.click()
@@ -77,15 +81,28 @@ def fill_input_data(page, dataRow) :
     sleep(random.uniform(0.1,0.5))
     _human_type2(email_input, generate_email(dataRow["Name"]))
     
+    iam = form_container.ele("tag:select@@id=650513_189162pi_650513_189162", timeout=3)
+    if iam:
+        iam.select.by_value("1267779")  # The consumer making the request
+        sleep(0.5)
+
     sleep(1)
+    helpers = __import__("lib.broker_helpers", fromlist=["select_state", "_state_full_name"])
     state_select = form_container.ele("tag:select@@id=650513_162846pi_650513_162846")
-    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
+    full = helpers._state_full_name(dataRow.get("State") or "")
+    try:
+        state_select.select.by_text(full)
+    except Exception:
+        raise NotImplementedError("hirerightcom: the form only serves %s; this customer is in %r" % (
+            "CA CO CT DE IN IA KY MD MN MT NE NH NJ OR RI TN TX UT VA", dataRow.get("State")))
+    sleep(3)
 
-    sleep(5)
-
-    delete_checkbox = form_container.ele("tag:input@@id:163410_1130415")
-    print(delete_checkbox)
-    delete_checkbox.run_js("this.click()")
+    clicked = page.run_js(
+        "var n=0;document.querySelectorAll(\"input[type=checkbox]\").forEach(function(c){"
+        "var l=document.querySelector(\"label[for='\"+c.id+\"']\");"
+        "if(l&&/delete/i.test(l.textContent)&&c.offsetParent!==null&&!c.checked){c.click();n++;}});return n;")
+    if not clicked:
+        raise RuntimeError("hirerightcom: no visible 'delete' checkbox after choosing the state")
     
 
 def hirerightcom(dataRow, website_name, in_user_email, run_mode) : 
@@ -112,7 +129,7 @@ def hirerightcom(dataRow, website_name, in_user_email, run_mode) :
             options.headless()
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        page.get("https://www.hireright.com/u-s-state-consumer-privacy-rights-request-form")
+        page.get("https://info.hireright.com/l/650513/2024-10-08/561z6m")
 
         sleep(random.uniform(3, 5))
 
@@ -121,26 +138,16 @@ def hirerightcom(dataRow, website_name, in_user_email, run_mode) :
         apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
         solver = TwoCaptcha(apiKey)
         print("Captcha is solving...")
-        try :
-            site_key = "6LfVnCYTAAAAAB4x9xlkeTsV8CO6np5UMhNjRNNZ"
-            site_url = page.url
-            result = solver.recaptcha(site_key, site_url)
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            pass
-
-        iframe_container = page.ele("tag:iframe@@id=iFrameResizer0")
-        form_container = iframe_container.ele("tag:form@@id=pardot-form")
-
-        textarea_token = form_container.ele("tag:textarea@@id=g-recaptcha-response")
-        print(textarea_token)
-        textarea_token.set.innerHTML(Code)
-
+        # reCAPTCHA Enterprise (sitekey from the live form)
+        result = solver.recaptcha(sitekey="6LdeKFcdAAAAAA8ieqIc8bHuW-X3fbCAl09z_wJd",
+                                  url="https://info.hireright.com/l/650513/2024-10-08/561z6m", enterprise=1)
+        Code = result["code"]
+        page.run_js(
+            "var t=arguments[0];"
+            "document.querySelectorAll(\"textarea[name='g-recaptcha-response']\")"
+            ".forEach(function(e){e.style.display='block';e.value=t;});", Code)
         sleep(random.uniform(0.5, 1))
-        submit_button = form_container.ele("tag:input@@value=Submit")
-        print(submit_button)
+        submit_button = page.ele("tag:input@@type=submit")
         submit_button.run_js("this.click();")
 
         

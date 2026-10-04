@@ -1384,3 +1384,23 @@ def mine_select_state(page, raw):
         raise RuntimeError("no state option %r in the dropdown" % full)
     li.click()
     sleep(0.4)
+
+
+def wait_turnstile_token(page, timeout=40):
+    """Many Turnstile widgets run in managed mode and fill
+    input[name=cf-turnstile-response] on their own in a real Chrome (seen on
+    brooksim, allpeople, kidslivesafe captures). Wait for that before
+    submitting; return the token or None."""
+    from time import sleep, time
+    end = time() + timeout
+    while time() < end:
+        try:
+            tok = page.run_js(
+                "var i=document.querySelector(\"input[name='cf-turnstile-response']\");"
+                "return i && i.value && i.value.length > 10 ? i.value : '';")
+        except Exception:
+            tok = ""
+        if tok:
+            return tok
+        sleep(1)
+    return None

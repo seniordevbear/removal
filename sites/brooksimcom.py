@@ -47,57 +47,50 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
-    page.wait.ele_displayed("tag:div@@class=SMuTIa")
+    # 2026-10-04 round-5 capture: the AWeber form in a Wix iframe is gone.
+    # brooksim.com/privacy-form now embeds dsr.trustsuperset.com; we open
+    # that page directly. Request type is a Radix combobox; the fields are
+    # plain inputs named first_name / last_name / email / phone / country /
+    # address_1 / city / region / zip_code; Cloudflare Turnstile solves
+    # itself in a real Chrome; "Submit Request" button. The site then e-mails
+    # a confirmation link (its page says click it within 1 hour).
+    helpers = __import__("lib.broker_helpers", fromlist=["wait_turnstile_token", "_state_full_name"])
+    combo = page.ele("css:button[role=combobox]", timeout=15)
+    if not combo:
+        raise RuntimeError("brooksimcom: request-type picker not found on the TrustSuperset form")
+    combo.click()
     sleep(1)
-    div_container = page.ele("tag:div@@class=SMuTIa")
-    print(div_container)
-    iframe_container = div_container.ele("tag:iframe")
-    print(iframe_container)
+    opt = page.ele("xpath://*[@role='option'][contains(.,'Erasure')]", timeout=5)
+    if not opt:
+        raise RuntimeError("brooksimcom: no 'Right to Erasure' option in the request-type picker")
+    opt.click()
+    sleep(0.5)
 
-    fullName_input = iframe_container.ele("tag:input@@id:107375605")
-    print(fullName_input)
-    fullName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fullName_input, dataRow["Name"])
+    def _box(name, val):
+        if not val:
+            return
+        el = page.ele("tag:input@@name=" + name, timeout=4)
+        if el:
+            el.click()
+            sleep(random.uniform(0.1, 0.3))
+            _human_type2(el, val)
 
-    email_input = iframe_container.ele("tag:input@@name=email")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
+    email_str = generate_email(dataRow["Name"])
+    _box("first_name", fName)
+    _box("last_name", lName)
+    _box("email", email_str)
+    _box("phone", (dataRow.get("Phone Number") or "").strip())
+    _box("country", "United States")
+    _box("address_1", dataRow.get("Address") or "")
+    _box("city", dataRow.get("City") or "")
+    _box("region", helpers._state_full_name(dataRow.get("State") or "") or (dataRow.get("State") or ""))
+    _box("zip_code", str(dataRow.get("Zipcode") or ""))
 
-
-    address_input = iframe_container.ele("tag:input@@id=awf_field-107375607street1")
-    address_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
-
-
-    city_input = iframe_container.ele("tag:input@@id=awf_field-107375607city")
-    city_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(city_input, dataRow["City"])
-
-    state_element = iframe_container.ele("tag:select@@id=awf_field-107375607state")
-    state_element.select.by_text(__import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
-
-    zip_input = iframe_container.ele("tag:input@@id=awf_field-107375607zip")
-    zip_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
-
-    phone_input = iframe_container.ele("tag:input@@id=awf_field-107375608")
-    phone_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, generate_phone_number())
-
-    delete_checkbox = iframe_container.ele("tag:input@@id=awf_field-107375609")
-    delete_checkbox.click()
-
-    sleep(2)
-    submit_button = iframe_container.ele("tag:input@@value=Submit")
-    submit_button.run_js("this.click()")
+    if not helpers.wait_turnstile_token(page):
+        raise RuntimeError("brooksimcom: Turnstile did not produce a token within 40s")
+    submit_button = page.ele("xpath://button[@type='submit'][contains(.,'Submit')]", timeout=5)
+    submit_button.click()
+    sleep(5)
 
 def brooksimcom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
@@ -122,7 +115,7 @@ def brooksimcom(dataRow, website_name, in_user_email, run_mode) :
             options.headless()
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        page.get("https://www.brooksim.com/privacy-form")
+        page.get("https://dsr.trustsuperset.com/?orgId=2dc76d0a-78d2-4492-9fc1-39da892fc0d5")
        
         sleep(1)
 
