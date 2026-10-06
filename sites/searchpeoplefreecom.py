@@ -154,7 +154,7 @@ def searchpeoplefreecom(dataRow, website_name, in_user_email, run_mode) :
         sleep(5)
         page.get_screenshot(screenshot_save_path)
         from lib.email_verification import do_email_verification
-        if not do_email_verification("searchpeoplefree", screenshot_save_path):
+        if not do_email_verification("searchpeoplefree", screenshot_save_path, to_address=email_str):
             raise RuntimeError("searchpeoplefreecom: removal link requested but no confirmation e-mail link was found")
 
         try :

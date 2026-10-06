@@ -153,7 +153,7 @@ def allpeoplecom(dataRow, website_name, in_user_email, run_mode):
         page.get_screenshot(screenshot_save_path)
 
         # they e-mail a confirmation link; the removal only happens when it is opened
-        if not do_email_verification("allpeople", screenshot_save_path):
+        if not do_email_verification("allpeople", screenshot_save_path, to_address=email_str):
             raise RuntimeError("allpeoplecom: removal requested for %s but no confirmation e-mail link was found" % email_str)
 
         try :

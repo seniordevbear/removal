@@ -113,7 +113,8 @@ def contactoutcom(dataRow, website_name, in_user_email, run_mode) :
         # The removal only happens when the link in their e-mail is opened.
         from lib.email_verification import do_email_verification
         try:
-            do_email_verification("contactout", screenshot_save_path)
+            if not do_email_verification("contactout", screenshot_save_path, to_address=email_str):
+                raise RuntimeError("no confirmation mail arrived")
         except Exception as e:
             raise RuntimeError("contactoutcom: verification link sent to %s but not confirmed: %s" % (email_str, e))
 

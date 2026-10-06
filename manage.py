@@ -1621,6 +1621,12 @@ def runs(x):
         process_groups_removal()
     elif x == 3:
         process_groups_face_removal()
+    elif x == 5:
+        # 2026-10-06: reads the confirmation mailbox over IMAP every 15 min:
+        # bounces -> row failed + address blacklisted; stray confirmation
+        # links -> opened. See lib/mailbox_sweep.py.
+        from lib.mailbox_sweep import sweep_loop
+        sweep_loop(_db_connect, interval=_get_env_int("MAILBOX_SWEEP_INTERVAL", 900))
     else:
         ssl_context = None
         if SOCKET_SERVER_USE_SSL:
@@ -1649,5 +1655,5 @@ if "--reset-claims" in sys.argv:
 
 
 if __name__ == "__main__":
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        executor.map(runs, range(5))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        executor.map(runs, range(6))

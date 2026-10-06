@@ -106,7 +106,8 @@ def advancedbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode):
         if not mode:
             raise RuntimeError("advancedbackgroundcheckscom: /opt-out form not found (layout changed)")
         mode.select.by_value("subject")
-        for fid, val in (("sfn", fName), ("sln", lName), ("semail", generate_email(dataRow["Name"]))):
+        email_str = generate_email(dataRow["Name"])
+        for fid, val in (("sfn", fName), ("sln", lName), ("semail", email_str)):
             el = page.ele("tag:input@@id=" + fid)
             el.click()
             sleep(random.uniform(0.1, 0.4))
@@ -156,7 +157,7 @@ def advancedbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode):
             sleep(5)
             tab.get_screenshot(screenshot_save_path)
 
-        if not do_email_verification("advancedbackgroundchecks", screenshot_save_path, after_click=_fill_optout_form):
+        if not do_email_verification("advancedbackgroundchecks", screenshot_save_path, after_click=_fill_optout_form, to_address=email_str):
             raise RuntimeError("advancedbackgroundcheckscom: opt-out link requested but no e-mail link was found")
 
         sleep(2)

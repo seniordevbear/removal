@@ -91,6 +91,7 @@ def fill_input_data(page, dataRow) :
     submit_button = page.ele("xpath://button[@type='submit'][contains(.,'Submit')]", timeout=5)
     submit_button.click()
     sleep(5)
+    return email_str
 
 def brooksimcom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
@@ -119,9 +120,13 @@ def brooksimcom(dataRow, website_name, in_user_email, run_mode) :
        
         sleep(1)
 
-        fill_input_data(page, dataRow)
-
-        sleep(random.uniform(1, 2))
+        email_str = fill_input_data(page, dataRow)
+        page.get_screenshot(screenshot_save_path)
+        # TrustSuperset e-mails "Verify Your Data Subject Request"; the
+        # request only counts once that link is opened.
+        from lib.email_verification import do_email_verification
+        if not do_email_verification("brooksim", screenshot_save_path, to_address=email_str):
+            raise RuntimeError("brooksimcom: request submitted but no verification mail arrived for %s" % email_str)
         
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)

@@ -1117,6 +1117,14 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
     if not privacy_email:
         privacy_email = "privacy@" + _broker_to_host(broker_name)
 
+    # 2026-10-06: addresses that bounced (recorded by lib.mailbox_sweep from
+    # the confirmation mailbox). Sending again would be reported as a removal
+    # while nothing was delivered -> park the broker instead.
+    from lib.mailbox_sweep import is_dead
+    if is_dead(privacy_email):
+        raise NotImplementedError(broker_name + ": privacy address " + privacy_email +
+                                  " bounces (dead_privacy_emails.json); needs another route")
+
     user_name = (dataRow.get("Name") or "").strip()
     user_email = (dataRow.get("User Email") or "").strip()
     user_address = (dataRow.get("Address") or dataRow.get("Street") or "").strip()
@@ -1178,6 +1186,9 @@ def run_ccpa_email_optout(broker_name, dataRow, privacy_email=None,
     msg["To"] = privacy_email
     msg["Reply-To"] = user_email
     msg["Subject"] = subject
+    # lets the mailbox sweep map a bounce back to the customer + broker row
+    msg["X-PD-Broker"] = broker_name
+    msg["X-PD-User"] = str(dataRow.get("__user_id__") or "")
     msg["Date"] = formatdate(localtime=True)
     msg.set_content(body)
     if auth_pdf:

@@ -143,7 +143,7 @@ def callersmartcom(dataRow, website_name, in_user_email, run_mode):
         page.get_screenshot(screenshot_save_path)
 
         # the opt-out completes only when their e-mailed confirmation link is opened
-        if not do_email_verification("callersmart", screenshot_save_path):
+        if not do_email_verification("callersmart", screenshot_save_path, to_address=email_str):
             raise RuntimeError("callersmartcom: opt-out requested for %s / %s but no confirmation e-mail link was found" % (email_str, phone))
 
         try :
