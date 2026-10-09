@@ -138,6 +138,73 @@ ROUND6 = {
     "idtruecom": "https://www.idtrue.com/optout",
 }
 
+# Round 7 (2026-10-09): NEW brokers — the 60 people-search sites from the
+# Phonetix gap list confirmed by 10+ sources. Nothing is scripted for these
+# yet; the capture is the first step.
+#     Scripts\python.exe capture_forms.py round7
+ROUND7 = {
+    "zoominfocom": "https://www.zoominfo.com/about-zoominfo/privacy-manage-profile",
+    "transunioncom": "https://www.transunion.com/credit-freeze/place-credit-freeze",
+    "lead411com": "https://lead411.com/your-privacy-choices/",
+    "liverampcom": "https://submit-irm.trustarc.com/services/validation/697ea013-8e66-44aa-94c5-fa9d38dd439c",
+    "melissacom": "https://apps.melissa.com/user/consumerprivacy.aspx",
+    "peopledatalabscom": "https://www.peopledatalabs.com/opt-out-form",
+    "peoplewhizcom": "https://www.peoplewhiz.com/remove-my-info",
+    "thomsonreuterscom": "https://privacyportal-cdn.onetrust.com/dsarwebform/dbf5ae8a-0a6a-4f4b-b527-",
+    "infopaycom": "https://www.infopay.com/contact",
+    "peopleconnectus": "https://suppression.peopleconnect.us/login",
+    "civisanalyticscom": "https://www.civisanalytics.com/privacy-policy/#ccpa",
+    "enformioncom": "https://www.enformion.com/do-not-sell/",
+    "nielsencom": "https://www.nielsen.com/legal/optout-page/",
+    "peoplelookercom": "https://www.peoplelooker.com/f/optout/search",
+    "propertyradarcom": "https://www.propertyradar.com/privacy-policy",
+    "propertyreachcom": "https://www.propertyreach.com/privacy-rights",
+    "oraclecom": "https://datacloudoptout.oracle.com/",
+    "rrdcom": "https://www.rrd.com/do-not-sell",
+    "thedatatrustcom": "https://thedatatrust.com/do-not-sell-my-personal-information/",
+    "crunchbasecom": "https://preferences.crunchbase.com/form/opt_out",
+    "firstorioncom": "https://privacy.firstorion.com/",
+    "lotamecom": "https://www.lotame.com/about-lotame/privacy/lotames-opt-out/",
+    "merklecom": "https://www.merkleinc.com/en/privacy-policy/data-product-privacy-notice/control-your-personal-information.html",
+    "publicrecordsnowcom": "https://www.publicrecordsnow.com/static/view/optout/",
+    "targetsmartcom": "https://privacy.targetsmart.com/",
+    "uscom": "https://idm.us.com/do-not-sell-my-personal-information/",
+    "clearviewai": "https://www.clearview.ai/privacy-and-requests",
+    "edvisorscom": "https://www.edvisors.com/delete-request/",
+    "freephonetracercom": "https://www.beenverified.com/app/optout/search",
+    "nationalpublicdatacom": "https://nationalpublicdata.com/optout.html",
+    "reholdcom": "https://rehold.com/control/privacy",
+    "sterlingai": "https://sterling.ai/privacy-policy/",
+    "tapadcom": "https://crportal.tapad.com",
+    "telephonelistsbiz": "https://www.evs7.com/personal-information-request",
+    "uspeoplesearchcom": "https://uspeoplesearch.com/purge-my-data/",
+    "innoviscom": "https://www.innovis.com/personal/securityFreeze",
+    "peoplefindercom": "https://peoplefinder.com/optout.php",
+    "peoplefindersdaascom": "https://peoplefindersdaas.com/",
+    "persopocom": "http://info.persopo.com/opt-out.html",
+    "reversephonelookupcom": "https://www.intelius.com/privacy-center",
+    "unitedstatesphonebookcom": "http://www.unitedstatesphonebook.com/contact.php",
+    "voterrecordscom": "https://voterrecords.com/faq",
+    "attomdatacom": "https://ccpa.attomdata.com/",
+    "dobsearchcom": "https://www.dobsearch.com/people-finder/block-record-request.php",
+    "easybackgroundcheckscom": "https://www.intelius.com/suppression-center/",
+    "forewarncom": "https://www.forewarn.com/privacy-policy/",
+    "locatesmartercom": "https://forms.locatesmarter.com/optoutform",
+    "northcarolinaresidentdatabasecom": "https://northcarolinaresidentdatabase.com/opt-out",
+    "peoplesearchexpertcom": "https://www.peoplesearchexpert.com/",
+    "phonebookscom": "https://www.phonebooks.com/opt-out",
+    "ufindname": "https://ufind.name/opt-out",
+    "ancestrycom": "https://support.ancestry.com/s/reportissue?language=en_US",
+    "confidentialphonelookupcom": "https://www.confidentialphonelookup.com/removals/",
+    "corporationwikicom": "https://www.corporationwiki.com/profiles/public",
+    "familysearchorg": "https://www.familysearch.org/en/help/helpcenter/article/how-do-i-remove-vitals-information-in-family-tree",
+    "floridaresidentsdirectorycom": "https://www.floridaresidentsdirectory.com/opt-out",
+    "ohioresidentdatabasecom": "https://www.ohioresidentdatabase.com/opt-out",
+    "peoplesearchorg": "https://people-search.org",
+    "reonomycom": "https://joindeleteme.com/opt-out-guides/reonomy-opt-out-guide/",
+    "searchusapeoplecom": "https://www.searchusapeople.com/data-removal-request/",
+}
+
 
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
@@ -164,7 +231,7 @@ def main():
 
     ok = fail = 0
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6}.get(arg, TARGETS)
+    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)
