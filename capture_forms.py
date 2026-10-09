@@ -118,6 +118,26 @@ ROUND5 = {
     "inmarketcom-center": "https://preferences.inmarket.com/",
 }
 
+# Round 6 (2026-10-09): the next band of brokers failing on every run.
+#     Scripts\python.exe capture_forms.py round6
+ROUND6 = {
+    "golookupcom": "https://golookup.com/support/optout",
+    "endatocom": "https://go.enformion.com/privacy-policy/opt-out/",
+    "equifaxcom": "https://myprivacy.equifax.com/personal-info",
+    "fastpeoplesearchinfo": "https://fastpeoplesearch.info/optout",
+    "fetcherai": "https://app.fetcher.ai/opt-out",
+    "giantpartnerscom": "https://giantpartners.com/do-not-sell-my-personal-info-all-other-states/",
+    "freebackgroundcheckio": "https://freebackgroundcheck.io/optout",
+    "freepeoplesearchio": "https://freepeoplesearch.io/optout",
+    "getemailscom": "https://app.retention.com/optout/",
+    "greatlakeslistscom": "https://greatlakeslists.com/opt_out_request.php",
+    "gostratacom": "https://www.gostrata.com/do-not-sell-my-personal-information/",
+    "herecom": "https://www.here.com/en-gb/privacy/here-data-subject-request",
+    "idstrongcom": "https://www.idstrong.com/privacyform/",
+    "idcrawlcom": "https://www.idcrawl.com/remove-my-information",
+    "idtruecom": "https://www.idtrue.com/optout",
+}
+
 
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
@@ -144,7 +164,7 @@ def main():
 
     ok = fail = 0
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5}.get(arg, TARGETS)
+    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)
