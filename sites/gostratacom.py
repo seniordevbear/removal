@@ -1,101 +1,95 @@
-from lib.broker_helpers import (
-    safe_chromium_for_broker, find_input, screenshot_step, log_step, _state_full_name,
-)
-from lib.common import generate_email, generate_phone_number
-from lib.captcha import get_solver
+"""Strata (gostrata.com/do-not-sell-my-personal-information) — rewritten
+2026-10-10 from the live page.
+
+Gravity Forms #5. Field ids from the capture:
+  input_5_12_3 first   input_5_12_6 last
+  input_5_13_1 street  input_5_13_3 city  input_5_13_4 state  input_5_13_5 zip
+  input_5_14 email     input_5_15 phone   input_5_16_1 consent checkbox
+  input_5_17 details   input_5_19 / apbct__email_id__gravity_form: HONEYPOTS,
+  must stay empty (CleanTalk); filling them marks the request as spam.
+"""
+import random
 from time import sleep
-import json as _json
-import re as _re
-import logging
+
+from lib.broker_helpers import (
+    safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents,
+    select_state, missing_pii,
+)
+from lib.captcha import get_solver
+from lib.common import generate_email
+
+URL = "https://www.gostrata.com/do-not-sell-my-personal-information/"
+SITE_KEY = "6LddXzgaAAAAAGIeL8C5cg-vK-dynuLbOLmOY0af"
 
 
-# Rewritten 2026-08-29 from the live form. gostrata's opt-out is a Gravity
-# Form (id 5) at /do-not-sell-my-personal-information/: name block
-# (input_5_12_3/_12_6), address block (13_1 street, 13_3 city, 13_4 state
-# SELECT, 13_5 zip), Email (14) + Email confirmation (8), Phone (15,
-# required), a certification checkbox (16_1), and reCAPTCHA v2. The old
-# script targeted input_13.4 as an <input> (it is a <select>) and missed the
-# required phone/confirmation — hence the crash.
 def gostratacom(dataRow, website_name, in_user_email, run_mode):
     broker = "gostratacom"
-    name_full = (dataRow.get("Name") or "").strip()
-    parts = name_full.split()
-    first = parts[0] if parts else ""
-    last = parts[-1] if len(parts) > 1 else ""
-    if not first or not last:
-        raise RuntimeError(broker + ": requires first and last name")
-    email = generate_email(name_full)
-    phone = (dataRow.get("Phone Number") or "").strip() or generate_phone_number()
-    state_full = _state_full_name(dataRow.get("State") or "")
+    name = (dataRow.get("Name") or "").strip()
+    if not name:
+        raise RuntimeError(broker + ": no name on this profile")
+    first, last = name.split()[0], name.split()[-1]
+    if not (dataRow.get("State") or "").strip():
+        raise missing_pii("State")
 
-    with safe_chromium_for_broker(broker,
-                                  headless=(run_mode == "headless")) as page:
+    with safe_chromium_for_broker(broker, headless=(run_mode == "headless")) as page:
+        page.get(URL)
+        sleep(4)
         try:
-            log_step(broker, "GET https://www.gostrata.com/do-not-sell-my-personal-information/")
-            page.get("https://www.gostrata.com/do-not-sell-my-personal-information/")
-            sleep(3)
-
-            def fill(sel, val):
-                if not val:
-                    return
-                el = find_input(page, sel, timeout=6.0)
-                el.click(); el.input(val); sleep(0.2)
-
-            fill("css:#input_5_12_3", first)
-            fill("css:#input_5_12_6", last)
-            fill("css:#input_5_13_1", (dataRow.get("Address") or dataRow.get("Street") or "").strip())
-            fill("css:#input_5_13_3", (dataRow.get("City") or "").strip())
-            fill("css:#input_5_13_5", (dataRow.get("Zipcode") or "").strip())
-            fill("css:#input_5_14", email)
-            fill("css:#input_5_8", email)       # confirmation must match
-            fill("css:#input_5_15", phone)
-
-            if state_full:
-                try:
-                    page.ele("css:#input_5_13_4", timeout=4).select.by_text(state_full)
-                except Exception:
-                    try:
-                        page.ele("css:select[name='input_13.4']").select.by_text(state_full)
-                    except Exception as e:
-                        log_step(broker, "state select skipped: " + str(e), logging.WARNING)
-            sleep(0.2)
-
-            # certification checkbox
-            try:
-                cb = page.ele("css:#input_5_16_1", timeout=4)
-                if cb:
-                    try:
-                        cb.click()
-                    except Exception:
-                        cb.click(by_js=True)
-            except Exception:
-                pass
-            sleep(0.3)
-
-            # reCAPTCHA v2 — sitekey lives in the widget iframe URL at runtime
-            frame = page.ele("css:iframe[src*='recaptcha']", timeout=10)
-            m = _re.search(r"[?&]k=([\w-]+)", frame.attr("src") or "")
-            if not m:
-                raise RuntimeError(broker + ": recaptcha sitekey not found")
-            log_step(broker, "solving recaptcha " + m.group(1))
-            token = get_solver().recaptcha(sitekey=m.group(1), url=page.url)["code"]
-            page.run_js(
-                "var t=document.getElementById('g-recaptcha-response');"
-                "if(t){t.value=" + _json.dumps(token) + ";}"
-                "document.querySelectorAll('textarea[name=\"g-recaptcha-response\"]')"
-                ".forEach(function(x){x.value=" + _json.dumps(token) + ";});")
-            sleep(0.5)
-
-            shot = screenshot_step(page, broker, "before_submit")
-            find_input(page, "css:#gform_submit_button_5", "css:input[type=submit]",
-                       "css:button[type=submit]", timeout=6).click()
-            sleep(6)
-            shot = screenshot_step(page, broker, "after_submit") or shot
-            log_step(broker, "submitted")
-            return shot
+            dismiss_common_consents(page, broker)
         except Exception:
-            try:
-                screenshot_step(page, broker, "error")
-            except Exception:
-                pass
-            raise
+            pass
+
+        def box(fid, value, required=True):
+            el = page.ele("tag:input@@id=" + fid, timeout=8 if required else 3)
+            if not el:
+                if required:
+                    raise RuntimeError("%s: no #%s on the form" % (broker, fid))
+                return
+            el.click()
+            sleep(random.uniform(0.1, 0.3))
+            el.input(str(value))
+
+        box("input_5_12_3", first)
+        box("input_5_12_6", last)
+        box("input_5_13_1", (dataRow.get("Address") or dataRow.get("Street") or "").strip(), required=False)
+        box("input_5_13_3", (dataRow.get("City") or "").strip(), required=False)
+        st = page.ele("tag:select@@id=input_5_13_4", timeout=4)
+        if st:
+            select_state(st, dataRow.get("State"))
+        box("input_5_13_5", str(dataRow.get("Zipcode") or ""), required=False)
+        box("input_5_14", (dataRow.get("User Email") or "").strip() or generate_email(name))
+        phone = (dataRow.get("Phone Number") or "").strip()
+        if phone:
+            box("input_5_15", phone, required=False)
+        details = page.ele("tag:textarea@@id=input_5_17", timeout=3)
+        if details:
+            details.click()
+            details.input("Please delete my personal information and do not sell or share it.")
+        cb = page.ele("tag:input@@id=input_5_16_1", timeout=3)
+        if cb and not cb.states.is_checked:
+            cb.click(by_js=True)
+
+        try:
+            token = get_solver().recaptcha(sitekey=SITE_KEY, url=URL)["code"]
+            page.run_js(
+                "var t=arguments[0];document.querySelectorAll(\"textarea[name='g-recaptcha-response']\")"
+                ".forEach(function(e){e.style.display='block';e.value=t;});", token)
+            sleep(1)
+        except Exception as e:
+            log_step(broker, "captcha solve failed: %s" % e)
+
+        screenshot_step(page, broker, "before_submit")
+        btn = page.ele("tag:input@@id=gform_submit_button_5", timeout=6)
+        if not btn:
+            raise RuntimeError(broker + ": no Gravity Forms submit button")
+        btn.click()
+        sleep(7)
+        path = screenshot_step(page, broker, "after_submit")
+        html = page.html or ""
+        if "gform_confirmation" in html or "Thanks for contacting us" in html or "thank you" in html.lower():
+            log_step(broker, "submitted, form confirmed")
+            return path
+        errs = page.run_js(
+            "var o=[];document.querySelectorAll('.gfield_description.validation_message,.validation_error')"
+            ".forEach(function(e){if(e.offsetParent!==null)o.push(e.innerText.trim());});return o.join(' | ');") or ""
+        raise RuntimeError(broker + ": form not confirmed" + (" — " + errs[:160] if errs else ""))

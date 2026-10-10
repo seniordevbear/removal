@@ -50,6 +50,9 @@ def make_standard_num(num) :
     return ret
 
 def equifaxcom(dataRow, website_name, in_user_email, run_mode) : 
+    # 2026-10-10: NotImplementedError -> manage.py parks the row as step 4
+    # ("no automation") instead of crashing on it every day.
+    raise NotImplementedError("equifaxcom: Equifax myPrivacy requires an SSN or ITIN (captured 2026-10-10); PrivacyDuck does not hold customer SSNs and will not submit one")
     page = None
     try : 
         

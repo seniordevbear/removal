@@ -1,196 +1,72 @@
-from DrissionPage import ChromiumPage, ChromiumOptions
-from time import sleep
-import json
+"""Fetcher (app.fetcher.ai/opt-out) — rewritten 2026-10-10 from the live page.
+
+The old script drove a layout that no longer exists (122 crashes in the
+5-8 Oct logs, 0 successes). The current form is three fields inside an Ant
+Design form plus reCAPTCHA.
+"""
 import random
-import os, datetime, pyautogui, requests
-from lib.common import generate_email, generate_phone_number
-from twocaptcha import TwoCaptcha
-from cloudsolver.extension import proxies
+from time import sleep
 
-now = datetime.datetime.now()
-current_date = now.strftime("%Y-%m-%d")
-base_dir = os.getcwd()
+from lib.broker_helpers import (
+    safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents,
+)
+from lib.captcha import get_solver
+from lib.common import generate_email
 
-screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
-os.makedirs(screentShotDir, exist_ok=True)
-
-def get_chromium_options(arguments: list) -> ChromiumOptions:
-    """
-    Configures and returns Chromium options.
-    
-    :param browser_path: Path to the Chromium browser executable.
-    :param arguments: List of arguments for the Chromium browser.
-    :return: Configured ChromiumOptions instance.
-    """
-    options = ChromiumOptions()
-    # options.no_imgs(True)
-    # options.no_imgs(True).mute(True).no_js(True)
-    # options.set_argument('--auto-open-devtools-for-tabs', 'true') # we don't need this anymore
-    for argument in arguments:
-        options.set_argument(argument)
-    return options
-
-def _human_type2(element , text: str) -> None:
-    """
-    Types in a way reminiscent of a human, with a random delay in between 50ms to 100ms for every character
-    :param element: Input element to type text to
-    :param text: Input to be typed
-    """
-
-    for c in text:
-        element.input(c)
-
-        sleep(random.uniform(0.05, 0.1))
-
-def fill_input_data(page, dataRow) : 
-    
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-
-    fName_input = page.ele("tag:input@@id=first_name")
-    fName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
-
-    lName_input = page.ele("tag:input@@id=last_name")
-    lName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    email_input = page.ele("tag:input@@id=email")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
-    
-
-def fetcherai(dataRow, website_name, in_user_email, run_mode) : 
-    page = None
-    try : 
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-
-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\FetcherAI_" + fName + "-" + lName + ".png"
-        
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
-
-        port_arr = [
-            "10001",
-            "10002",
-            "10003",
-            "10004",
-            "10005",
-            "10006",
-            "10007",
-            "10008",
-            "10009",
-            "10010"
-        ]
-
-        random_number = random.randint(0, 9)
-
-        
-        #Launch Website
-        username = os.getenv("SMARTPROXY_USER", "")
-        password = os.getenv("SMARTPROXY_PASSWORD", "")
-        endpoint = os.getenv("SMARTPROXY_ENDPOINT", "isp.smartproxy.com")
-        port = port_arr[random_number]
+URL = "https://app.fetcher.ai/opt-out"
+SITE_KEY = "6LeTnMkUAAAAAJ3xj0Qe1vQWJ0Yk2XQ4vYpTnO3r"  # page-rendered; token is injected by name
 
 
-        print(endpoint + ":" + port)
-        proxy_extension = proxies(username, password, endpoint, port)
+def fetcherai(dataRow, website_name, in_user_email, run_mode):
+    broker = "fetcherai"
+    name = (dataRow.get("Name") or "").strip()
+    if not name:
+        raise RuntimeError(broker + ": no name on this profile")
+    first = name.split()[0]
+    last = name.split()[-1]
 
-        options = get_chromium_options(arguments).auto_port().add_extension("extension")
+    with safe_chromium_for_broker(broker, headless=(run_mode == "headless")) as page:
+        page.get(URL)
+        sleep(4)
+        try:
+            dismiss_common_consents(page, broker)
+        except Exception:
+            pass
 
-        if run_mode == "headless" :
-            options.headless()
-        
-        #Launch Website
-        page = ChromiumPage(addr_or_opts=options)
-        page.get("https://app.fetcher.ai/opt-out")        
+        def box(el_id, value):
+            el = page.ele("tag:input@@id=" + el_id, timeout=12)
+            if not el:
+                raise RuntimeError("%s: no #%s on the opt-out form" % (broker, el_id))
+            el.click()
+            sleep(random.uniform(0.1, 0.3))
+            el.input(value)
 
-        fill_input_data(page, dataRow)
+        box("first_name", first)
+        box("last_name", last)
+        box("email", (dataRow.get("User Email") or "").strip() or generate_email(name))
 
-        page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA")
-        sleep(1)
-        
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
-        print(rc_anchor_container)
-        rc_anchor_container.click()
-
-        sleep(2)
-        page.wait.ele_displayed("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        sleep(1)
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        audio_button = iframe_container1.ele("tag:button@@id=recaptcha-audio-button")
-
-        print(audio_button)
-        audio_button.click()
-        audio_source = iframe_container1.ele("tag:audio@@id=audio-source").attr("src")
-        print(audio_source)
-
-        response = requests.get(audio_source)
-        with open(("__downloaded_%d.mp3" % __import__("threading").get_ident()), "wb") as file:
-            file.write(response.content)
-
-        sleep(1)
-
-        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
-        solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            result = solver.audio(("__downloaded_%d.mp3" % __import__("threading").get_ident()), lang="en")
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
+        # reCAPTCHA: the widget renders its own textarea; solve by sitekey read
+        # from the page so a key rotation does not silently break the script.
+        key = page.run_js(
+            "var e=document.querySelector('[data-sitekey]');return e?e.getAttribute('data-sitekey'):'';") or SITE_KEY
+        try:
+            token = get_solver().recaptcha(sitekey=key, url=URL)["code"]
+            page.run_js(
+                "var t=arguments[0];document.querySelectorAll(\"textarea[name='g-recaptcha-response']\")"
+                ".forEach(function(e){e.style.display='block';e.value=t;});", token)
+            sleep(1)
         except Exception as e:
-            print("Error: ", str(e))
-        audio_reponse_input = iframe_container1.ele("tag:input@@id=audio-response")
-        _human_type2(audio_reponse_input, Code)
+            log_step(broker, "captcha solve failed: %s" % e)
 
-        verify_btn = iframe_container1.ele("tag:button@@id=recaptcha-verify-button")
-        verify_btn.click()
-
-        sleep(5)
-
-        submit_button = page.ele("tag:button@@text()=Submit")
-        submit_button.click()
-
-        
-        try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
-        
-    except Exception as e:
-        try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
-        raise
-
-    finally:
-        if page is not None:
-            try:
-                page.quit()
-            except Exception:
-                pass
-
-    return screenshot_save_path
+        screenshot_step(page, broker, "before_submit")
+        btn = page.ele("css:form button[type=submit]", timeout=6)
+        if not btn:
+            raise RuntimeError(broker + ": no submit button on the opt-out form")
+        btn.click()
+        sleep(6)
+        path = screenshot_step(page, broker, "after_submit")
+        html = (page.html or "").lower()
+        if "thank" in html or "received" in html or "submitted" in html:
+            log_step(broker, "submitted, page confirmed")
+            return path
+        raise RuntimeError(broker + ": no confirmation message after submit")

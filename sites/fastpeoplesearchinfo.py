@@ -99,6 +99,9 @@ def fill_input_data(page, dataRow) :
     _human_type2(zip_input, str(dataRow["Zipcode"]))
 
 def fastpeoplesearchinfo(dataRow, website_name, in_user_email, run_mode) : 
+    # 2026-10-10: NotImplementedError -> manage.py parks the row as step 4
+    # ("no automation") instead of crashing on it every day.
+    raise NotImplementedError("fastpeoplesearchinfo: fastpeoplesearch.info/optout renders no form (captured 2026-10-10); site appears parked")
     page = None
     try : 
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"

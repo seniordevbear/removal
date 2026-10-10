@@ -1,202 +1,103 @@
-from DrissionPage import ChromiumPage, ChromiumOptions
-from DrissionPage.common import Actions
-from time import sleep
-import json
+"""Endato / Enformion privacy portal — rewritten 2026-10-10 from the live page.
+
+endato.com/privacy-policy/opt-out/ now redirects to go.enformion.com's portal.
+Captured fields: requesterType select, firstName / middleName / lastName /
+email, a privacyAuthorization checkbox, a hidden requestType=optout, and
+`yourFavoriteNumber` — a HONEYPOT that must stay empty. Submit is
+<input type="button">, so a form.submit() would bypass its handler.
+"""
 import random
-import os, datetime, pyautogui, requests
-from lib.common import generate_email, generate_phone_number
-from twocaptcha import TwoCaptcha
+from time import sleep
+
+from lib.broker_helpers import (
+    safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents, missing_pii,
+)
+from lib.captcha import get_solver
+
+URL = "https://go.enformion.com/privacy-policy/opt-out/"
+SITE_KEY = "6LctO8YpAAAAAPjFnOnh1XSs0a0Y2pJCOuMuSDjg"
 
 
-now = datetime.datetime.now()
-current_date = now.strftime("%Y-%m-%d")
-base_dir = os.getcwd()
+def endatocom(dataRow, website_name, in_user_email, run_mode):
+    broker = "endatocom"
+    name = (dataRow.get("Name") or "").strip()
+    email = (dataRow.get("User Email") or "").strip()
+    if not name:
+        raise RuntimeError(broker + ": no name on this profile")
+    if not email:
+        raise missing_pii("User Email")
+    parts = name.split()
+    first, last = parts[0], parts[-1]
+    middle = parts[1] if len(parts) > 2 else ""
 
-screentShotDir = os.path.join(base_dir, "ScreenShot", current_date)
-os.makedirs(screentShotDir, exist_ok=True)
-usaStateDictionary = { 'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'District of Columbia': 'DC', 'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY' }
-
-def get_chromium_options(arguments: list) -> ChromiumOptions:
-    """
-    Configures and returns Chromium options.
-    
-    :param browser_path: Path to the Chromium browser executable.
-    :param arguments: List of arguments for the Chromium browser.
-    :return: Configured ChromiumOptions instance.
-    """
-    options = ChromiumOptions()
-    # options.no_imgs(True)
-    # options.no_imgs(True).mute(True).no_js(True)
-    # options.set_argument('--auto-open-devtools-for-tabs', 'true') # we don't need this anymore
-    for argument in arguments:
-        options.set_argument(argument)
-    return options
-
-def _human_type1(ac , text: str) -> None:
-    """
-    Types in a way reminiscent of a human, with a random delay in between 50ms to 100ms for every character
-    :param element: Input element to type text to
-    :param text: Input to be typed
-    """
-
-    for c in text:
-        ac.type(c)
-
-        sleep(random.uniform(0.05, 0.1))
-
-def _human_type2(element , text: str) -> None:
-    """
-    Types in a way reminiscent of a human, with a random delay in between 50ms to 100ms for every character
-    :param element: Input element to type text to
-    :param text: Input to be typed
-    """
-
-    for c in text:
-        element.input(c)
-
-        sleep(random.uniform(0.05, 0.1))
-
-def make_standard_num(num) :
-    ret = str(num)
-    if len(ret) < 2 : ret = "0" + ret
-    
-    return ret
-
-def fill_input_data(page, dataRow) : 
-    print(str("adsfadsf"))
-    
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-
-    fName_input = page.ele("tag:input@@name=firstName")
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
-
-    lName_input = page.ele("tag:input@@name=lastName")
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    email_input = page.ele("tag:input@@name=email")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
-
-    birthday = make_standard_num(dataRow["Birth Month"]) + "/" + make_standard_num(dataRow["Birth Day"]) + "/" + str(dataRow["Birth Year"])
-    print(birthday)
-    birth_input = page.ele("tag:input@@name=dob")
-    print(birth_input)
-    birth_input.click()
-    page.actions.type(birthday)
-
-    phone_input = page.ele("tag:input@@name=phone")
-    phone_input.click()
-    print("typing the phone number...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, generate_phone_number())
-
-    address_input = page.ele("tag:input@@name=address")
-    address_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
-
-    city_input = page.ele("tag:input@@name=city")
-    city_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(city_input, dataRow["City"])
-
-    state_input = page.ele("tag:input@@name=state")
-    state_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(state_input, __import__("lib.broker_helpers", fromlist=["state_abbrev"]).state_abbrev(dataRow["State"]))
-
-    zip_input = page.ele("tag:input@@name=zip")
-    zip_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
-
-def endatocom(dataRow, website_name, in_user_email, run_mode) : 
-    page = None
-    try : 
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\EndatoCom_" + fName + "-" + lName + ".png"
-        
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            # "--incognito",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
-
-        options = get_chromium_options(arguments).auto_port()
-        if run_mode == "headless" : 
-            options.headless()
-        #Launch Website
-        page = ChromiumPage(addr_or_opts=options)
-        page.get("https://endato.com/privacy-policy/opt-out/")
-
-        sleep(random.uniform(1, 2))
-
-        page.refresh()
-        
-        fill_input_data(page, dataRow)
-
-        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
-        solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            site_key = "6Le8dMgpAAAAAMUlk_hJ650nTX04-FXforzHO9-p"
-            site_url = page.url
-            result = solver.recaptcha(site_key, site_url)
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
+    with safe_chromium_for_broker(broker, headless=(run_mode == "headless")) as page:
+        page.get(URL)
+        sleep(5)
+        try:
+            dismiss_common_consents(page, broker)
+        except Exception:
             pass
 
-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response")
-        textarea_token.set.innerHTML(Code)
-
-        sleep(random.uniform(0.5, 1))
-
-        submit_button = page.ele("tag:input@@value=Submit")
-        submit_button.click()
-
-        
-        try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(10)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
-        
-    except Exception as e:
-        try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(10)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
-        raise
-
-    finally:
-        if page is not None:
+        # "I am:" — the consumer, not an authorised agent (that branch asks for
+        # agent details we do not have).
+        sel = page.ele("tag:select@@name=requesterType", timeout=12)
+        if not sel:
+            raise RuntimeError(broker + ": requesterType select not found (portal changed)")
+        picked = False
+        for text in ("Consumer", "Myself", "The consumer", "Individual"):
             try:
-                page.quit()
+                sel.select.by_text(text)
+                picked = True
+                break
+            except Exception:
+                continue
+        if not picked:
+            try:
+                sel.select.by_index(1)
             except Exception:
                 pass
+        sleep(1)
 
-    return screenshot_save_path
+        def box(nm, value, required=True):
+            el = page.ele("tag:input@@name=" + nm, timeout=8 if required else 3)
+            if not el:
+                if required:
+                    raise RuntimeError("%s: no input[name=%s]" % (broker, nm))
+                return
+            el.click()
+            sleep(random.uniform(0.1, 0.3))
+            el.input(value)
 
-    
+        box("firstName", first)
+        if middle:
+            box("middleName", middle, required=False)
+        box("lastName", last)
+        box("email", email)
+        # yourFavoriteNumber is the honeypot — deliberately left untouched.
+
+        cb = page.ele("tag:input@@name=privacyAuthorization", timeout=4)
+        if cb and not cb.states.is_checked:
+            cb.click(by_js=True)
+
+        try:
+            token = get_solver().recaptcha(sitekey=SITE_KEY, url=URL)["code"]
+            page.run_js(
+                "var t=arguments[0];document.querySelectorAll(\"textarea[name='g-recaptcha-response']\")"
+                ".forEach(function(e){e.style.display='block';e.value=t;});", token)
+            sleep(1)
+        except Exception as e:
+            log_step(broker, "captcha solve failed: %s" % e)
+
+        screenshot_step(page, broker, "before_submit")
+        btn = (page.ele("css:input[type=button][value='Submit']", timeout=6)
+               or page.ele("xpath://input[@value='Submit'] | //button[contains(.,'Submit')]", timeout=3))
+        if not btn:
+            raise RuntimeError(broker + ": no Submit control on the portal form")
+        btn.click()
+        sleep(7)
+        path = screenshot_step(page, broker, "after_submit")
+        html = (page.html or "").lower()
+        if any(w in html for w in ("thank you", "received", "submitted", "confirmation")):
+            log_step(broker, "submitted, portal confirmed")
+            return path
+        raise RuntimeError(broker + ": no confirmation after submit")

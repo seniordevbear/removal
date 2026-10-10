@@ -45,6 +45,9 @@ def _human_type2(element , text: str) -> None:
         sleep(random.uniform(0.05, 0.1))
 
 def idtruecom(dataRow, website_name, in_user_email, run_mode) : 
+    # 2026-10-10: NotImplementedError -> manage.py parks the row as step 4
+    # ("no automation") instead of crashing on it every day.
+    raise NotImplementedError("idtruecom: idtrue.com does not resolve from the VPS (captured 2026-10-04 and 2026-10-10); site appears gone")
     page = None
     try : 
         
