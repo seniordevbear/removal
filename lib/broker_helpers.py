@@ -1549,3 +1549,67 @@ def click_safe(page, selector, timeout=6.0, required=True, broker="?"):
     if required:
         raise RuntimeError("%s: could not click %s" % (broker, selector))
     return False
+
+
+def submission_verdict(page, broker="?", success_phrases=(), timeout=12.0):
+    """Decide whether a form was actually accepted, from the RENDERED page.
+
+    2026-10-11: the first version of the new round-6 scripts tested
+    `"thank you" in page.html.lower()`. gostrata's page carries that string in
+    a CSS comment and `gform_confirmation` in its stylesheet, so the check
+    passed on a form that had just been REJECTED for two missing required
+    fields, and the row was written to the customer as removed. Substring
+    tests against raw HTML cannot tell "the page says thanks" from "the page
+    mentions thanks somewhere in its source".
+
+    This looks at what a person would see instead:
+      * any visible validation error  -> rejected, and the messages are named
+      * a visible confirmation box, or a success phrase in the visible text,
+        or the form element disappearing entirely -> accepted
+      * anything else -> unconfirmed (never a silent success)
+
+    Returns (True, note) on success; raises RuntimeError otherwise.
+    """
+    from time import sleep, time
+    phrases = tuple(p.lower() for p in (success_phrases or (
+        "thank you", "thanks for", "we have received", "request received",
+        "has been received", "has been submitted", "successfully submitted",
+        "your request", "we'll be in touch", "check your email")))
+    CONFIRM_SEL = (".gform_confirmation_message,.gform_confirmation_wrapper,"
+                   ".wpforms-confirmation-container,.wpforms-confirmation-container-full,"
+                   ".hs-form__success,.submitted-message,.form-success,.success-message,"
+                   "[class*='confirmation'],[class*='thank-you'],[role='status']")
+    ERROR_SEL = (".gfield_description.validation_message,.validation_error,.gform_validation_errors,"
+                 ".wpforms-error,.hs-error-msg,.error-message,.field-error,"
+                 "[class*='validation_message'],[aria-invalid='true']")
+    end = time() + timeout
+    last = {}
+    while time() < end:
+        try:
+            last = page.run_js(
+                "var vis=function(e){return e && e.offsetParent!==null && (e.innerText||'').trim().length>0;};"
+                "var errs=[];document.querySelectorAll(" + repr(ERROR_SEL) + ").forEach(function(e){"
+                "  if(vis(e)){var f=e.closest('li,.gfield,.hs-form-field,.form-group');"
+                "  var l=f?((f.querySelector('label')||{}).innerText||''):'';"
+                "  errs.push((l?l.trim().replace(/\s+/g,' ')+': ':'')+e.innerText.trim().replace(/\s+/g,' '));}});"
+                "var conf=[];document.querySelectorAll(" + repr(CONFIRM_SEL) + ").forEach(function(e){"
+                "  if(vis(e)) conf.push(e.innerText.trim().replace(/\s+/g,' ').slice(0,160));});"
+                "return {errs:errs.slice(0,6), conf:conf.slice(0,2),"
+                "        forms:document.querySelectorAll('form').length,"
+                "        text:(document.body.innerText||'').toLowerCase().slice(0,20000)};") or {}
+        except Exception:
+            last = {}
+        errs = [e for e in (last.get("errs") or []) if e]
+        if errs:
+            raise RuntimeError("%s: form rejected — %s" % (broker, " | ".join(errs)[:220]))
+        if last.get("conf"):
+            log_step(broker, "confirmed: " + last["conf"][0][:120])
+            return True, last["conf"][0][:160]
+        vis_text = last.get("text") or ""
+        hit = next((p for p in phrases if p in vis_text), None)
+        if hit:
+            log_step(broker, "confirmed by visible text: %r" % hit)
+            return True, hit
+        sleep(1)
+    raise RuntimeError("%s: no confirmation and no error after submit — treating as NOT submitted "
+                       "(forms still on page: %s)" % (broker, last.get("forms", "?")))

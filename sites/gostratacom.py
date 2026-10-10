@@ -13,7 +13,7 @@ from time import sleep
 
 from lib.broker_helpers import (
     safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents,
-    select_state, missing_pii, fill_field,
+    select_state, missing_pii, fill_field, submission_verdict,
 )
 from lib.captcha import get_solver
 from lib.common import generate_email
@@ -54,10 +54,17 @@ def gostratacom(dataRow, website_name, in_user_email, run_mode):
         if st:
             select_state(st, dataRow.get("State"))
         box("input_5_13_5", str(dataRow.get("Zipcode") or ""), required=False)
-        box("input_5_14", (dataRow.get("User Email") or "").strip() or generate_email(name))
+        # 2026-10-11: field_5_8 "Email Address Confirmation" and field_5_15
+        # "Phone" are both REQUIRED. The first version skipped them, the form
+        # was rejected, and the row was still written as removed. Same shape
+        # as the arrests.org Confirm-Email bug.
+        email = (dataRow.get("User Email") or "").strip() or generate_email(name)
+        box("input_5_14", email)
+        box("input_5_8", email)
         phone = (dataRow.get("Phone Number") or "").strip()
-        if phone:
-            box("input_5_15", phone, required=False)
+        if not phone:
+            raise missing_pii("Phone Number")
+        box("input_5_15", phone)
         fill_field(page, "tag:textarea@@id=input_5_17",
                    "Please delete my personal information and do not sell or share it.",
                    timeout=3, required=False, broker=broker)
@@ -79,13 +86,6 @@ def gostratacom(dataRow, website_name, in_user_email, run_mode):
         if not btn:
             raise RuntimeError(broker + ": no Gravity Forms submit button")
         btn.click()
-        sleep(7)
-        path = screenshot_step(page, broker, "after_submit")
-        html = page.html or ""
-        if "gform_confirmation" in html or "Thanks for contacting us" in html or "thank you" in html.lower():
-            log_step(broker, "submitted, form confirmed")
-            return path
-        errs = page.run_js(
-            "var o=[];document.querySelectorAll('.gfield_description.validation_message,.validation_error')"
-            ".forEach(function(e){if(e.offsetParent!==null)o.push(e.innerText.trim());});return o.join(' | ');") or ""
-        raise RuntimeError(broker + ": form not confirmed" + (" — " + errs[:160] if errs else ""))
+        sleep(4)
+        submission_verdict(page, broker)          # raises unless really accepted
+        return screenshot_step(page, broker, "after_submit")

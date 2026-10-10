@@ -9,7 +9,7 @@ from time import sleep
 
 from lib.broker_helpers import (
     safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents, missing_pii,
-    fill_field,
+    fill_field, submission_verdict,
 )
 from lib.captcha import get_solver
 
@@ -54,10 +54,6 @@ def getemailscom(dataRow, website_name, in_user_email, run_mode):
         if not btn:
             raise RuntimeError(broker + ": no submit button in #verify_opt")
         btn.click()
-        sleep(6)
-        path = screenshot_step(page, broker, "after_submit")
-        html = (page.html or "").lower()
-        if any(w in html for w in ("thank", "check your email", "confirm", "received", "success")):
-            log_step(broker, "submitted, page confirmed")
-            return path
-        raise RuntimeError(broker + ": no confirmation message after submit")
+        sleep(4)
+        submission_verdict(page, broker)
+        return screenshot_step(page, broker, "after_submit")

@@ -11,7 +11,7 @@ from time import sleep
 
 from lib.broker_helpers import (
     safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents, missing_pii,
-    fill_field,
+    fill_field, submission_verdict,
 )
 from lib.captcha import get_solver
 
@@ -90,10 +90,6 @@ def endatocom(dataRow, website_name, in_user_email, run_mode):
         if not btn:
             raise RuntimeError(broker + ": no Submit control on the portal form")
         btn.click()
-        sleep(7)
-        path = screenshot_step(page, broker, "after_submit")
-        html = (page.html or "").lower()
-        if any(w in html for w in ("thank you", "received", "submitted", "confirmation")):
-            log_step(broker, "submitted, portal confirmed")
-            return path
-        raise RuntimeError(broker + ": no confirmation after submit")
+        sleep(4)
+        submission_verdict(page, broker)
+        return screenshot_step(page, broker, "after_submit")
