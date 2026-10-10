@@ -1442,3 +1442,110 @@ def wait_turnstile_token(page, timeout=40):
             return tok
         sleep(1)
     return None
+
+
+def fill_field(page, selector, value, timeout=8.0, required=True, broker="?"):
+    """Put `value` into the input/textarea matched by `selector`, whatever the
+    page does to it.
+
+    2026-10-11: NoRectError ("this element has no location or size") was the
+    second most common failure in the 5-8 Oct logs, 256 times. It does not
+    mean the field is missing — it means the field has no box to click: it is
+    off-screen, zero-sized, inside a collapsed section, or one of several
+    copies of the same form (desktop/mobile) where only one is laid out.
+    gostrata's Gravity Form does exactly this.
+
+    Three attempts, cheapest first: a normal click+type, then scroll into view
+    and click through JavaScript, then set the value directly and fire the
+    input/change events that React, Angular and jQuery validation listen for.
+    Returns True when the value actually landed in the field.
+    """
+    el = page.ele(selector, timeout=timeout)
+    if not el:
+        if required:
+            raise RuntimeError("%s: no field matching %s" % (broker, selector))
+        return False
+    value = "" if value is None else str(value)
+
+    def _landed():
+        try:
+            return (el.value or "") == value
+        except Exception:
+            return False
+
+    try:
+        el.click()
+        el.clear()
+        el.input(value)
+        if _landed():
+            return True
+    except Exception:
+        pass
+
+    try:
+        page.scroll.to_see(el)
+        el.click(by_js=True)
+        el.input(value)
+        if _landed():
+            return True
+    except Exception:
+        pass
+
+    try:
+        page.run_js(
+            "var e=arguments[0], v=arguments[1];"
+            "if(!e){return false;}"
+            "var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e),'value');"
+            "if(d&&d.set){d.set.call(e,v);}else{e.value=v;}"
+            "e.dispatchEvent(new Event('input',{bubbles:true}));"
+            "e.dispatchEvent(new Event('change',{bubbles:true}));"
+            "e.dispatchEvent(new Event('blur',{bubbles:true}));"
+            "return true;", el, value)
+        if _landed():
+            log_step(broker, "filled %s via JS (element had no clickable box)" % selector)
+            return True
+    except Exception as e:
+        log_step(broker, "JS fill failed for %s: %s" % (selector, e), logging.WARNING)
+
+    if required:
+        raise RuntimeError("%s: could not put a value into %s" % (broker, selector))
+    return False
+
+
+def visible_field(page, selector, timeout=8.0):
+    """The first match for `selector` that is actually laid out. Pages that
+    render a desktop and a mobile copy of the same form return the hidden one
+    first; clicking that raises NoRectError."""
+    try:
+        els = page.eles(selector, timeout=timeout)
+    except Exception:
+        return None
+    for el in els or []:
+        try:
+            if el.states.is_displayed and el.rect.size != (0, 0):
+                return el
+        except Exception:
+            continue
+    return (els or [None])[0]
+
+
+def click_safe(page, selector, timeout=6.0, required=True, broker="?"):
+    """Click whatever `selector` matches, falling back to a JavaScript click
+    when the element has no clickable box (NoRectError). Returns True if a
+    click was dispatched."""
+    el = page.ele(selector, timeout=timeout)
+    if not el:
+        if required:
+            raise RuntimeError("%s: nothing matching %s to click" % (broker, selector))
+        return False
+    for attempt in ("plain", "scrolled", "js"):
+        try:
+            if attempt == "scrolled":
+                page.scroll.to_see(el)
+            el.click(by_js=(attempt == "js"))
+            return True
+        except Exception:
+            continue
+    if required:
+        raise RuntimeError("%s: could not click %s" % (broker, selector))
+    return False

@@ -11,6 +11,7 @@ from time import sleep
 
 from lib.broker_helpers import (
     safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents, missing_pii,
+    fill_field,
 )
 from lib.captcha import get_solver
 
@@ -59,14 +60,9 @@ def endatocom(dataRow, website_name, in_user_email, run_mode):
         sleep(1)
 
         def box(nm, value, required=True):
-            el = page.ele("tag:input@@name=" + nm, timeout=8 if required else 3)
-            if not el:
-                if required:
-                    raise RuntimeError("%s: no input[name=%s]" % (broker, nm))
-                return
-            el.click()
+            fill_field(page, "tag:input@@name=" + nm, value,
+                       timeout=8 if required else 3, required=required, broker=broker)
             sleep(random.uniform(0.1, 0.3))
-            el.input(value)
 
         box("firstName", first)
         if middle:

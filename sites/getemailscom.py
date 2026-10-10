@@ -9,6 +9,7 @@ from time import sleep
 
 from lib.broker_helpers import (
     safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents, missing_pii,
+    fill_field,
 )
 from lib.captcha import get_solver
 
@@ -33,17 +34,9 @@ def getemailscom(dataRow, website_name, in_user_email, run_mode):
         except Exception:
             pass
 
-        em = page.ele("tag:input@@id=optout-email", timeout=12)
-        if not em:
-            raise RuntimeError(broker + ": no #optout-email box (page changed)")
-        em.click()
-        em.input(email)
+        fill_field(page, "tag:input@@id=optout-email", email, timeout=12, broker=broker)
         sleep(random.uniform(0.2, 0.5))
-
-        zp = page.ele("tag:input@@id=optout-zipcode", timeout=5)
-        if zp:
-            zp.click()
-            zp.input(zipc)
+        fill_field(page, "tag:input@@id=optout-zipcode", zipc, timeout=5, required=False, broker=broker)
 
         try:
             token = get_solver().recaptcha(sitekey=SITE_KEY, url=URL)["code"]

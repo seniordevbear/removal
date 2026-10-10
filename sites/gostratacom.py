@@ -13,7 +13,7 @@ from time import sleep
 
 from lib.broker_helpers import (
     safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents,
-    select_state, missing_pii,
+    select_state, missing_pii, fill_field,
 )
 from lib.captcha import get_solver
 from lib.common import generate_email
@@ -40,14 +40,11 @@ def gostratacom(dataRow, website_name, in_user_email, run_mode):
             pass
 
         def box(fid, value, required=True):
-            el = page.ele("tag:input@@id=" + fid, timeout=8 if required else 3)
-            if not el:
-                if required:
-                    raise RuntimeError("%s: no #%s on the form" % (broker, fid))
+            if not value and not required:
                 return
-            el.click()
+            fill_field(page, "tag:input@@id=" + fid, value,
+                       timeout=8 if required else 3, required=required, broker=broker)
             sleep(random.uniform(0.1, 0.3))
-            el.input(str(value))
 
         box("input_5_12_3", first)
         box("input_5_12_6", last)
@@ -61,10 +58,9 @@ def gostratacom(dataRow, website_name, in_user_email, run_mode):
         phone = (dataRow.get("Phone Number") or "").strip()
         if phone:
             box("input_5_15", phone, required=False)
-        details = page.ele("tag:textarea@@id=input_5_17", timeout=3)
-        if details:
-            details.click()
-            details.input("Please delete my personal information and do not sell or share it.")
+        fill_field(page, "tag:textarea@@id=input_5_17",
+                   "Please delete my personal information and do not sell or share it.",
+                   timeout=3, required=False, broker=broker)
         cb = page.ele("tag:input@@id=input_5_16_1", timeout=3)
         if cb and not cb.states.is_checked:
             cb.click(by_js=True)

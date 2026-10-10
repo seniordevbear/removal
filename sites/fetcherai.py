@@ -8,7 +8,7 @@ import random
 from time import sleep
 
 from lib.broker_helpers import (
-    safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents,
+    safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents, fill_field,
 )
 from lib.captcha import get_solver
 from lib.common import generate_email
@@ -34,12 +34,8 @@ def fetcherai(dataRow, website_name, in_user_email, run_mode):
             pass
 
         def box(el_id, value):
-            el = page.ele("tag:input@@id=" + el_id, timeout=12)
-            if not el:
-                raise RuntimeError("%s: no #%s on the opt-out form" % (broker, el_id))
-            el.click()
+            fill_field(page, "tag:input@@id=" + el_id, value, timeout=12, broker=broker)
             sleep(random.uniform(0.1, 0.3))
-            el.input(value)
 
         box("first_name", first)
         box("last_name", last)
