@@ -223,10 +223,47 @@ def main():
         log("DrissionPage import failed:\n" + traceback.format_exc())
         return 1
 
-    opts = ChromiumOptions()
-    opts.set_argument("--start-maximized")
-    opts = opts.auto_port()
-    page = ChromiumPage(addr_or_opts=opts)
+    # Chrome launch with a timeout and diagnostics. Rounds 6 and 7 on
+    # 2026-10-10 sat at this line forever; earlier rounds took 2-3 minutes to
+    # get past it. The launch runs in a thread so a hang is reported instead
+    # of waited on, and it is retried once with a fresh temp profile.
+    try:
+        import psutil
+        n_chrome = sum(1 for p in psutil.process_iter(["name"]) if (p.info["name"] or "").lower().startswith("chrome"))
+        log("chrome processes already running: %d" % n_chrome)
+    except Exception:
+        pass
+    import threading, tempfile
+
+    def _launch(fresh_profile):
+        opts = ChromiumOptions()
+        opts.set_argument("--start-maximized")
+        opts.set_argument("-no-first-run")
+        opts = opts.auto_port()
+        if fresh_profile:
+            opts.set_user_data_path(tempfile.mkdtemp(prefix="pd-capture-"))
+        box = {}
+
+        def _go():
+            try:
+                box["page"] = ChromiumPage(addr_or_opts=opts)
+            except Exception as e:
+                box["err"] = e
+        t = threading.Thread(target=_go, daemon=True)
+        t.start()
+        t.join(120)
+        if t.is_alive():
+            return None, "Chrome did not start within 120s"
+        return box.get("page"), (str(box.get("err")) if box.get("err") else None)
+
+    page, err = _launch(False)
+    if page is None:
+        log("browser launch failed (%s); retrying with a fresh temp profile" % err)
+        page, err = _launch(True)
+    if page is None:
+        log("browser launch failed again (%s). Stop manage.py, close every Chrome window, "
+            "then run this again. If it still hangs, run: taskkill /IM chrome.exe /F" % err)
+        return 1
     log("browser open")
 
     ok = fail = 0

@@ -364,6 +364,10 @@ db_config = {
     # managed database — it ignores connection_timeout, so it never even
     # errors. The pure-Python path connects normally.
     "use_pure": True,
+    # 2026-10-10: socket timeout. On 8 Oct the removal loop blocked for 30+
+    # hours inside a DB call after the managed database dropped connections
+    # (18:15-18:49); the pure driver has no read timeout unless this is set.
+    "connection_timeout": _get_env_int("DB_SOCKET_TIMEOUT", 120),
 }
 # Only pass SSL options when a CA file is actually configured. Passing
 # ssl_ca="" made mysql-connector-python 9.x treat the empty string as a real
@@ -1476,6 +1480,37 @@ def _process_removal_row(row):
 _ccpa_exclusion_logged = [False]  # log the quota state change once, not every tick
 
 
+_watchdog_beats = {}
+_watchdog_lock = threading.Lock()
+
+
+def _watchdog_beat(name):
+    with _watchdog_lock:
+        _watchdog_beats[name] = time.time()
+
+
+def _watchdog_start(name, max_silence):
+    """2026-10-10: if a loop stops ticking for max_silence seconds the process
+    exits with code 3 so start.bat restarts it. On 8-9 Oct the removal loop
+    sat silent for 30+ hours while housekeeping kept logging, so nothing
+    looked wrong from outside."""
+    _watchdog_beat(name)
+
+    def _run():
+        while True:
+            time.sleep(60)
+            with _watchdog_lock:
+                last = _watchdog_beats.get(name, 0)
+            silence = time.time() - last
+            if silence > max_silence:
+                log.critical("WATCHDOG: %s loop silent for %.0fs (> %.0fs) — exiting for restart",
+                             name, silence, max_silence)
+                logging.shutdown()
+                os._exit(3)
+
+    threading.Thread(target=_run, name="watchdog-" + name, daemon=True).start()
+
+
 def process_groups_removal():
     """Worker 2: removal loop.
 
@@ -1488,9 +1523,14 @@ def process_groups_removal():
     at most one in-flight row per user. Atomic CAS claiming is kept, so this
     also stays safe if multiple instances ever run.
     """
+    # Spare threads so a worker stuck in a broker (no DrissionPage/solver call
+    # is guaranteed to return) cannot hold the whole loop; see the wait below.
     pool = concurrent.futures.ThreadPoolExecutor(
-        max_workers=REMOVAL_CONCURRENCY, thread_name_prefix="removal-worker")
+        max_workers=REMOVAL_CONCURRENCY + 3, thread_name_prefix="removal-worker")
+    row_timeout = _get_env_float("REMOVAL_ROW_TIMEOUT_SECONDS", 1800.0)
+    _watchdog_start("removal", _get_env_float("REMOVAL_WATCHDOG_SECONDS", 2700.0))
     while True:
+        _watchdog_beat("removal")
         conn = None
         try:
             exclude = ()
@@ -1511,6 +1551,7 @@ def process_groups_removal():
             conn = None
 
             futures = []
+            data_dispatched = []
             for row in data:
                 user_id_str = str(row["user_id"])
                 now_ts = time.time()
@@ -1522,15 +1563,39 @@ def process_groups_removal():
                         continue
                     _inflight_users.add(user_id_str)
                 futures.append(pool.submit(_process_removal_row, row))
+                data_dispatched.append(row)
 
             # Barrier per tick: claimed rows are step=1 so a re-fetch couldn't
             # double-claim anyway, but waiting keeps pacing/in-flight state
             # simple and bounds how much work is ever queued at once.
             if futures:
-                concurrent.futures.wait(futures)
-                for f in futures:
+                done, pending = concurrent.futures.wait(futures, timeout=row_timeout)
+                for f in done:
                     if f.exception() is not None:
                         log.error("removal worker crashed: %r", f.exception())
+                if pending:
+                    # 2026-10-10: a worker that never returns used to freeze the
+                    # loop for good. Give up waiting, release its customer slot
+                    # and mark the row so it is retried; the thread is left to
+                    # finish or die on its own (the chrome reaper kills its
+                    # browser after 180 min).
+                    log.error("removal: %d worker(s) still running after %.0fs — abandoning the wait",
+                              len(pending), row_timeout)
+                    rows_by_future = dict(zip(futures, data_dispatched))
+                    for f in pending:
+                        row = rows_by_future.get(f)
+                        if not row:
+                            continue
+                        with _inflight_lock:
+                            _inflight_users.discard(str(row["user_id"]))
+                        try:
+                            c2 = _db_connect()
+                            try:
+                                _set_step(c2, row["id"], 3, "worker timeout after %ds on %s" % (row_timeout, row["target_domain"]))
+                            finally:
+                                c2.close()
+                        except Exception:
+                            log.exception("could not mark timed-out row id=%s", row.get("id"))
         except Exception:
             log.exception("removal tick failed")
         finally:
