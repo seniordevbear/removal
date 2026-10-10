@@ -82,7 +82,11 @@ from __removal import (
     ModuleMissing as RemovalModuleMissing,
     IncompletePII,
 )
-from lib.broker_helpers import CCPADailyLimitReached, ccpa_global_quota_reached
+from lib.broker_helpers import (
+    CCPADailyLimitReached,
+    ccpa_global_quota_reached,
+    direct_send_quota_reached,
+)
 from __face_removal import face_removal
 from lib.automation_delay import enable_automation_delays
 
@@ -637,13 +641,18 @@ def get_pending_scan(conn):
 
 _CCPA_DOMAINS_CACHE = None
 
-def _ccpa_email_domains():
-    """Domains whose broker script is a CCPA email opt-out (subject to the
-    global daily email cap). Discovered once by scanning sites/*.py for the
-    run_ccpa_email_optout call, so no per-script registry has to be kept."""
+def _email_broker_domains():
+    """Two sets of domains, by which daily e-mail budget they spend:
+
+        ("ccpa")   scripts calling run_ccpa_email_optout  -> CCPA_TOTAL_PER_DAY
+        ("direct") scripts calling send_email directly    -> EMAIL_SENDER_TOTAL_PER_DAY
+
+    2026-10-10: only the first set used to be discovered, so when the second
+    budget ran out its ~78 brokers stayed in selection and looped all day.
+    Discovered once by scanning sites/*.py, so no registry has to be kept."""
     global _CCPA_DOMAINS_CACHE
     if _CCPA_DOMAINS_CACHE is None:
-        found = set()
+        found = {"ccpa": set(), "direct": set()}
         sites_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sites")
         try:
             for fname in os.listdir(sites_dir):
@@ -651,14 +660,18 @@ def _ccpa_email_domains():
                     continue
                 try:
                     with open(os.path.join(sites_dir, fname), "r", encoding="utf-8", errors="ignore") as f:
-                        if "run_ccpa_email_optout" in f.read():
-                            found.add(fname[:-3])
+                        body = f.read()
                 except OSError:
                     continue
+                if "run_ccpa_email_optout" in body:
+                    found["ccpa"].add(fname[:-3])
+                elif "send_email" in body:
+                    found["direct"].add(fname[:-3])
         except OSError:
-            log.exception("could not scan sites/ for CCPA email brokers")
+            log.exception("could not scan sites/ for e-mail brokers")
         _CCPA_DOMAINS_CACHE = found
-        log.info("ccpa email brokers discovered: %d", len(found))
+        log.info("e-mail brokers discovered: %d ccpa, %d direct-send",
+                 len(found["ccpa"]), len(found["direct"]))
     return _CCPA_DOMAINS_CACHE
 
 
@@ -1454,6 +1467,12 @@ def _process_removal_row(row):
             # tick onward, and the counter resets at midnight.
             _set_step(conn, row["id"], 0)
             log.info("ccpa throttle: id=" + str(row["id"]) + " " + str(e))
+            # 2026-10-10: also advance this customer's pacing clock. Without
+            # it a throttled row left the user instantly eligible again, so
+            # the next tick picked another of their e-mail rows and threw it
+            # away too — the loop spun as fast as the tick, not once per
+            # pacing interval.
+            last_removal_processed_at.set(user_id_str, time.time())
         except Exception:
             log.exception("removal row failed id=%s", row["id"])
             crashes = _note_domain_crash(row["target_domain"])
@@ -1477,7 +1496,7 @@ def _process_removal_row(row):
             _inflight_users.discard(user_id_str)
 
 
-_ccpa_exclusion_logged = [False]  # log the quota state change once, not every tick
+_ccpa_exclusion_logged = [0]  # how many brokers were excluded last tick (log on change)
 
 
 _watchdog_beats = {}
@@ -1533,17 +1552,21 @@ def process_groups_removal():
         _watchdog_beat("removal")
         conn = None
         try:
-            exclude = ()
+            # Exclude each e-mail family only when ITS OWN budget is spent.
+            doms = _email_broker_domains()
+            spent = set()
             if ccpa_global_quota_reached():
-                exclude = tuple(_ccpa_email_domains())
-                if exclude and not _ccpa_exclusion_logged[0]:
-                    log.info(
-                        "ccpa quota spent — excluding %d email brokers from selection until midnight",
-                        len(exclude))
-                    _ccpa_exclusion_logged[0] = True
-            elif _ccpa_exclusion_logged[0]:
-                _ccpa_exclusion_logged[0] = False
-                log.info("ccpa quota reset — email brokers back in selection")
+                spent |= doms["ccpa"]
+            if direct_send_quota_reached():
+                spent |= doms["direct"]
+            exclude = tuple(spent)
+            if len(spent) != _ccpa_exclusion_logged[0]:
+                if spent:
+                    log.info("e-mail budget spent — excluding %d e-mail broker(s) "
+                             "from selection until midnight", len(spent))
+                else:
+                    log.info("e-mail budgets reset — e-mail brokers back in selection")
+                _ccpa_exclusion_logged[0] = len(spent)
             conn = _db_connect()
             data = get_pending_removal(conn, exclude_domains=exclude)
             log.info("removal tick: %d rows (concurrency=%d)", len(data), REMOVAL_CONCURRENCY)

@@ -1258,6 +1258,33 @@ def ccpa_global_quota_reached():
     return int(state.get("counts", {}).get("_global", 0)) >= CCPA_TOTAL_PER_DAY
 
 
+def direct_send_quota_reached():
+    """True when today's lib.email_sender budget is spent.
+
+    2026-10-10: there are TWO independent e-mail budgets — this one
+    (EMAIL_SENDER_TOTAL_PER_DAY, used by the 78 GDPR/EU scripts that call
+    send_email directly) and the CCPA one above (CCPA_TOTAL_PER_DAY, used by
+    the 64 run_ccpa_email_optout scripts). manage.py only ever checked the
+    CCPA counter, so once the 250 send_email slots were gone the GDPR brokers
+    stayed in selection and every one of their rows looped: claimed -> raise
+    -> requeued -> claimed again. In the 5-8 Oct logs that was ~20,000 wasted
+    cycles a day, crowding out the browser work that produces real removals.
+    """
+    import json, datetime
+    from lib.email_sender import _COUNTER_PATH, EMAIL_SENDER_TOTAL_PER_DAY
+    today = datetime.date.today().isoformat()
+    try:
+        with open(_COUNTER_PATH, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        return False
+    except (json.JSONDecodeError, OSError):
+        return True  # unreadable -> assume spent (fail closed), same as above
+    if state.get("date") != today:
+        return False
+    return int(state.get("count", 0)) >= EMAIL_SENDER_TOTAL_PER_DAY
+
+
 # ---------------------------------------------------------------------------
 # 2026-10-04 (capture_forms survey of the 22 worst brokers)
 # ---------------------------------------------------------------------------
