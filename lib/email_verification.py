@@ -43,7 +43,13 @@ IMAP_HOST = os.getenv("CONFIRMATION_IMAP_SERVER", "mail1.privacypros.com")
 IMAP_PORT = int(os.getenv("CONFIRMATION_IMAP_PORT", "993"))
 IMAP_USER = os.getenv("CONFIRMATION_EMAIL_USER", "confirmation")
 IMAP_PASSWORD = os.getenv("CONFIRMATION_EMAIL_PASSWORD", "")
-FOLDERS = [f.strip() for f in os.getenv("CONFIRMATION_IMAP_FOLDERS", "INBOX,Spam,Spam_Rejected").split(",") if f.strip()]
+# Folder names differ per server: SurgeMail calls them Spam / Spam_Rejected,
+# Gmail calls its spam folder "[Gmail]/Spam". Both sets are listed by default
+# and the ones that do not exist are skipped, so no setting has to change when
+# the mailbox moves.
+FOLDERS = [f.strip() for f in os.getenv(
+    "CONFIRMATION_IMAP_FOLDERS",
+    "INBOX,Spam,Spam_Rejected,[Gmail]/Spam,[Gmail]/All Mail").split(",") if f.strip()]
 
 # link words in order of preference
 _LINK_WORDS = ("verify-dsr", "verify", "confirm", "removalrequest", "opt-out", "optout",

@@ -25,9 +25,14 @@ from lib.broker_helpers import CCPADailyLimitReached
 
 log = logging.getLogger("pd.email_sender")
 
-SMTP_SERVER = os.getenv("CONFIRMATION_IMAP_SERVER", "mail1.privacypros.com")
+# 2026-10-10: sending used to borrow CONFIRMATION_IMAP_SERVER. That was fine
+# while one host did both, but on Google Workspace they differ
+# (smtp.gmail.com vs imap.gmail.com), so pointing the mailbox at Gmail would
+# have silently broken every outgoing request. SMTP_SERVER is now its own
+# setting and only falls back to the IMAP host for the old single-host setup.
+SMTP_SERVER = os.getenv("SMTP_SERVER") or os.getenv("CONFIRMATION_IMAP_SERVER", "mail1.privacypros.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USERNAME = os.getenv("CONFIRMATION_EMAIL_USER", "confirmation")
+SMTP_USERNAME = os.getenv("SMTP_USERNAME") or os.getenv("CONFIRMATION_EMAIL_USER", "confirmation")
 SMTP_PASSWORD = os.getenv("CONFIRMATION_EMAIL_PASSWORD")
 FROM_EMAIL = os.getenv("FROM_EMAIL", "confirmation@privacypros.com")
 SMTP_TIMEOUT = float(os.getenv("SMTP_TIMEOUT", "20"))

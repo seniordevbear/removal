@@ -61,3 +61,7 @@ pkgs.txt
 
 # output of capture_forms.py (page dumps of broker opt-out forms)
 capture_forms/
+
+# The credential file itself is never committed (2026-10-10): it briefly
+# contained live mailbox and database passwords in this repo.
+.env
