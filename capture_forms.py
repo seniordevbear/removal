@@ -205,6 +205,30 @@ ROUND7 = {
     "searchusapeoplecom": "https://www.searchusapeople.com/data-removal-request/",
 }
 
+# Round 8 (2026-10-11): SEARCH-RESULT pages for the free-exposure scan.
+# Only 7 of 416 sites_scan modules are real, so the lead magnet can check 5
+# sites and tells people they appear on 0-4. These are people-search sites we
+# can already REMOVE from, so anything found is actionable. Each capture is a
+# search for a common name; what matters is the shape of the results list.
+#     Scripts\python.exe capture_forms.py round8
+ROUND8 = {
+    "scan-truepeoplesearchcom": "https://www.truepeoplesearch.com/results?name=John%20Smith&citystatezip=Texas",
+    "scan-radariscom": "https://radaris.com/p/John/Smith/",
+    "scan-mylifecom": "https://www.mylife.com/search?searchTerm=John+Smith",
+    "scan-beenverifiedcom": "https://www.beenverified.com/people/john-smith/",
+    "scan-inteliuscom": "https://www.intelius.com/people-search/John-Smith/",
+    "scan-peoplefinderscom": "https://www.peoplefinders.com/name/john-smith",
+    "scan-nuwbercom": "https://nuwber.com/search?name=John+Smith",
+    "scan-cyberbackgroundcheckscom": "https://www.cyberbackgroundchecks.com/people/john-smith",
+    "scan-searchpeoplefreecom": "https://www.searchpeoplefree.com/find/john-smith",
+    "scan-anywhocom": "https://www.anywho.com/people/John+Smith/",
+    "scan-zabasearchcom": "https://www.zabasearch.com/people/john+smith/",
+    "scan-clustrmapscom": "https://clustrmaps.com/persons/John-Smith",
+    "scan-ussearchcom": "https://www.ussearch.com/people-search/john-smith/",
+    "scan-instantcheckmatecom": "https://www.instantcheckmate.com/people/john-smith/",
+    "scan-smartbackgroundcheckscom": "https://www.smartbackgroundchecks.com/people/john-smith",
+}
+
 
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
@@ -268,7 +292,7 @@ def main():
 
     ok = fail = 0
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7}.get(arg, TARGETS)
+    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)
