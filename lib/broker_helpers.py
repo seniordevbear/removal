@@ -279,16 +279,19 @@ def run_infopay_optout(broker_name: str, url: str, dataRow, run_mode: str = "non
             except Exception:
                 tbody = None
 
+            # 2026-10-11: each of these used to `return screenshot_save_path`,
+            # which manage.py reads as a completed removal. A broker that
+            # changed its layout, or a row we failed to select, was therefore
+            # reported to the customer as removed. Only "you are not listed"
+            # is a real outcome, and it returns the screenshot that proves it.
             if not tbody:
-                log_step(broker_name, "no results table -- broker may have changed flow")
-                screenshot_step(page, broker_name, "99_no_results_table")
-                return screenshot_save_path
+                shot = screenshot_step(page, broker_name, "99_no_results_table")
+                raise RuntimeError(broker_name + ": no results table — the broker changed its flow")
 
             rows = tbody.eles("tag:tr")
             if not rows:
                 log_step(broker_name, "results empty -- user not in broker DB")
-                screenshot_step(page, broker_name, "99_empty_results")
-                return screenshot_save_path
+                return screenshot_step(page, broker_name, "99_empty_results") or screenshot_save_path
 
             try:
                 rows[0].ele("tag:input@@type=checkbox").click()
@@ -297,9 +300,8 @@ def run_infopay_optout(broker_name: str, url: str, dataRow, run_mode: str = "non
                 log_step(broker_name, "selected first result")
                 sleep(2)
             except Exception as e:
-                log_step(broker_name, f"row select failed: {e}")
                 screenshot_step(page, broker_name, "99_row_select_fail")
-                return screenshot_save_path
+                raise RuntimeError("%s: could not select the matching record: %s" % (broker_name, e))
 
             # confirmation form
             try:
@@ -340,19 +342,17 @@ def run_infopay_optout(broker_name: str, url: str, dataRow, run_mode: str = "non
                 ).click()
                 log_step(broker_name, "clicked final submit")
                 sleep(3)
-                screenshot_step(page, broker_name, "05_submitted")
             except Exception as e:
-                log_step(broker_name, f"confirmation stage: {e}")
                 screenshot_step(page, broker_name, "99_confirm_fail")
+                raise RuntimeError("%s: confirmation stage failed: %s" % (broker_name, e))
 
-            try:
-                page.get_screenshot(screenshot_save_path)
-            except Exception:
-                pass
-    except Exception as outer:
-        log_step(broker_name, f"OUTER FAILURE: {outer}")
-
-    return screenshot_save_path
+            # The submit must be acknowledged by the page before this counts.
+            submission_verdict(page, broker_name)
+            return screenshot_step(page, broker_name, "05_submitted") or screenshot_save_path
+    except Exception:
+        # 2026-10-11: this used to swallow every failure and still return a
+        # path, so manage.py marked the row removed no matter what happened.
+        raise
 
 
 @contextlib.contextmanager
@@ -1591,9 +1591,9 @@ def submission_verdict(page, broker="?", success_phrases=(), timeout=12.0):
                 "var errs=[];document.querySelectorAll(" + repr(ERROR_SEL) + ").forEach(function(e){"
                 "  if(vis(e)){var f=e.closest('li,.gfield,.hs-form-field,.form-group');"
                 "  var l=f?((f.querySelector('label')||{}).innerText||''):'';"
-                "  errs.push((l?l.trim().replace(/\s+/g,' ')+': ':'')+e.innerText.trim().replace(/\s+/g,' '));}});"
+                r"  errs.push((l?l.trim().replace(/\s+/g,' ')+': ':'')+e.innerText.trim().replace(/\s+/g,' '));}});"
                 "var conf=[];document.querySelectorAll(" + repr(CONFIRM_SEL) + ").forEach(function(e){"
-                "  if(vis(e)) conf.push(e.innerText.trim().replace(/\s+/g,' ').slice(0,160));});"
+                r"  if(vis(e)) conf.push(e.innerText.trim().replace(/\s+/g,' ').slice(0,160));});"
                 "return {errs:errs.slice(0,6), conf:conf.slice(0,2),"
                 "        forms:document.querySelectorAll('form').length,"
                 "        text:(document.body.innerText||'').toLowerCase().slice(0,20000)};") or {}
