@@ -1,9 +1,22 @@
-# smartbackgroundcheckscom.py -- auto-generated stub
-# This broker has rows in `results` (kind=0, ~1231 rows) but no
-# implementation has been written. The dispatcher (__scan.py) catches
-# the ModuleNotFoundError raised below and marks the row step=4
-# (not_implemented) so it stops counting as a failure and stops being
-# retried. Implement the real broker and DELETE this stub.
+"""smartbackgroundcheckscom scan — written 2026-10-12 from the live search page.
 
-def smartbackgroundcheckscom(*args, **kwargs):
-    raise ModuleNotFoundError("sites_scan.smartbackgroundcheckscom")
+Was an auto-generated stub, so the free exposure scan could not check this
+site at all. Result page captured on the VPS: https://www.smartbackgroundchecks.com/people/first-last
+
+A hit here is actionable: sites/smartbackgroundcheckscom.py can remove the listing.
+"""
+from sites_scan._template import *
+
+
+def smartbackgroundcheckscom(dataRow, website_name, in_user_email, run_mode):
+    name = (dataRow.get("Name") or "").strip()
+    if not name:
+        return "Not Found"
+    parts = name.split()
+    First, Last = parts[0], parts[-1]
+    first, last = First.lower(), Last.lower()
+    shot = scan_shot_path("smartbackgroundcheckscom", dataRow)
+    urls = [
+        f"https://www.smartbackgroundchecks.com/people/{first}-{last}",
+    ]
+    return name_search_scan(shot, urls, ["css:div.card-normal", "css:a.name-list-title"], require_text=Last)
