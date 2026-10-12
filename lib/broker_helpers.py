@@ -574,6 +574,23 @@ def select_onetrust_state(container, raw, timeout=3):
     message naming the real problem. Returns True when a click landed.
     """
     raw = (raw or "").strip()
+
+    # 2026-10-12: on newer OneTrust forms the State list stays EMPTY until a
+    # Country is chosen, so a perfectly valid "IL" or "AZ" matched nothing and
+    # the run crashed. Nine scripts still called this without picking a
+    # country first (irysus, idstrong, i360, eltoro, costar, buyerlink,
+    # datatrust, analyticsiq, spglobal). Doing it here fixes all of them at
+    # once and is harmless on the older forms, which simply have no such
+    # field. Best-effort: never let this step be the thing that fails.
+    try:
+        _c = container.ele("tag:input@@id=countryDSARElement", timeout=1.5)
+        if _c and not (_c.value or "").strip():
+            select_onetrust_country(container)
+            from time import sleep as _s
+            _s(0.8)
+    except Exception as _e:
+        log_step("onetrust", "country step skipped: %s" % _e, logging.INFO)
+
     if not raw:
         # 2026-10-04: 175 rows/day hit this with an empty profile state. That
         # is missing customer data, not a broken script -> step 5.
