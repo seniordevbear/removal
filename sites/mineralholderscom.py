@@ -48,11 +48,9 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name 
 
-    fullName_input = page.ele("tag:input@@name=name")
-    fullName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fullName_input, dataRow["Name"])
+    _fill = __import__("lib.broker_helpers", fromlist=["fill_field"]).fill_field
+    _fill(page, "tag:input@@name=name", dataRow["Name"], timeout=12, broker="mineralholderscom")
+    sleep(random.uniform(0.1, 0.5))
 
     email_input = page.ele("tag:input@@name=email")
     email_input.click()
@@ -108,6 +106,22 @@ def mineralholderscom(dataRow, website_name, in_user_email, run_mode) :
         page = ChromiumPage(addr_or_opts=options)
 
         page.get(url)
+
+        # 2026-10-12: 107 failures on 11 Oct, all ElementNotFoundError on
+        # input[name=name]. The form is present on a plain fetch, so the
+        # browser was looking too early or at an overlay: there was no settle
+        # time and no consent dismissal between navigation and the first
+        # field. Give the page a moment, clear any banner, and say what the
+        # browser actually had if the form is still not there.
+        sleep(4)
+        try:
+            __import__("lib.broker_helpers", fromlist=["dismiss_common_consents"]).dismiss_common_consents(page, "mineralholderscom")
+        except Exception:
+            pass
+        if not page.ele("tag:input@@name=name", timeout=10):
+            raise RuntimeError(
+                "mineralholderscom: opt-out form not on the page (title=%r, url=%r)"
+                % ((page.title or "")[:70], (page.url or "")[:90]))
 
         fill_input_data(page, dataRow)
 
