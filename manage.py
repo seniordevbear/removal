@@ -663,10 +663,18 @@ def _email_broker_domains():
                         body = f.read()
                 except OSError:
                     continue
+                key = fname[:-3]
                 if "run_ccpa_email_optout" in body:
-                    found["ccpa"].add(fname[:-3])
+                    found["ccpa"].add(key)
                 elif "send_email" in body:
-                    found["direct"].add(fname[:-3])
+                    found["direct"].add(key)
+                elif "run_arrests_org_optout" in body and key.endswith("courtrecordsus"):
+                    # 2026-10-12: these delegate to the arrests helper, which
+                    # has no portal for the *courtrecords.us family and always
+                    # falls back to a CCPA e-mail. The script never names
+                    # run_ccpa_email_optout, so they were invisible here and
+                    # stayed in selection after the budget was spent.
+                    found["ccpa"].add(key)
         except OSError:
             log.exception("could not scan sites/ for e-mail brokers")
         _CCPA_DOMAINS_CACHE = found

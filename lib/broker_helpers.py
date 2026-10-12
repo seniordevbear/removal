@@ -710,6 +710,18 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
     state = _state_full_name(dataRow.get("State") or "")
     zipc = (dataRow.get("Zipcode") or "").strip()
 
+    # 2026-10-12: the *courtrecords.us sites have no portal at all, so this
+    # helper always ends up sending a CCPA e-mail for them. When that daily
+    # budget is already spent the send raises, the row is requeued, and the
+    # next tick repeats the whole thing — but only AFTER a browser launch and
+    # three portal URLs, about 30 seconds of Chrome per attempt. On 11 Oct
+    # that cost 992 pointless browser sessions on alabamacourtrecordsus alone.
+    # Check the budget first and fail in milliseconds instead.
+    if broker_name.endswith("courtrecordsus") and ccpa_global_quota_reached():
+        raise CCPADailyLimitReached(
+            broker_name + ": CCPA e-mail budget spent for today; "
+            "this broker has no portal, so there is nothing else to try")
+
     screenshot_path = None
     with safe_chromium_for_broker(broker_name,
                                   headless=(run_mode == "headless")) as page:
