@@ -1,7 +1,7 @@
 """ussearchcom scan — written 2026-10-12 from the live search page.
 
-Was an auto-generated stub, so the free exposure scan could not check this
-site at all. Result page captured on the VPS: https://www.ussearch.com/people-search/first-last/state/
+Replaces the generated placeholder, so the free exposure scan can check
+this site at all. Result page captured on the VPS: https://www.ussearch.com/people-search/first-last/state/
 
 A hit here is actionable: sites/ussearchcom.py can remove the listing.
 """

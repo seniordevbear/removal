@@ -1,7 +1,7 @@
 """anywhocom scan — written 2026-10-12 from the live search page.
 
-Was an auto-generated stub, so the free exposure scan could not check this
-site at all. Result page captured on the VPS: https://www.anywho.com/people/First+Last/state  (the national page is a state index, not a result list)
+Replaces the generated placeholder, so the free exposure scan can check
+this site at all. Result page captured on the VPS: https://www.anywho.com/people/First+Last/state  (the national page is a state index, not a result list)
 
 A hit here is actionable: sites/anywhocom.py can remove the listing.
 """

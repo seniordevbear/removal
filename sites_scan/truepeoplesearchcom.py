@@ -1,7 +1,7 @@
 """truepeoplesearchcom scan — written 2026-10-12 from the live search page.
 
-Was an auto-generated stub, so the free exposure scan could not check this
-site at all. Result page captured on the VPS: https://www.truepeoplesearch.com/results?name=First%20Last&citystatezip=State
+Replaces the generated placeholder, so the free exposure scan can check
+this site at all. Result page captured on the VPS: https://www.truepeoplesearch.com/results?name=First%20Last&citystatezip=State
 
 A hit here is actionable: sites/truepeoplesearchcom.py can remove the listing.
 """
