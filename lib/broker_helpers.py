@@ -924,6 +924,16 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
                     raise
 
             sleep(0.5)
+
+            # 2026-10-12: do not submit a form we already know will bounce.
+            # 53 brokers share this helper and the rejections were all the
+            # same shape: an address sub-field or the state dropdown left
+            # empty because the profile has no value the form accepts.
+            missing = unfilled_required_fields(page)
+            if missing:
+                screenshot_step(page, broker_name, "error_incomplete")
+                raise missing_pii(*missing)
+
             screenshot_path = screenshot_step(page, broker_name, "before_submit")
 
             submit_btn = find_input(
@@ -1642,3 +1652,45 @@ def submission_verdict(page, broker="?", success_phrases=(), timeout=12.0):
         sleep(1)
     raise RuntimeError("%s: no confirmation and no error after submit — treating as NOT submitted "
                        "(forms still on page: %s)" % (broker, last.get("forms", "?")))
+
+
+def unfilled_required_fields(page, limit=8):
+    """Labels of fields the form marks required but which are still empty.
+
+    2026-10-12: the arrests.org family kept submitting and being rejected --
+    "Address *: This field is required | Address *: --- Select state ---" --
+    because safe_select() returns False instead of raising, so a state that
+    would not match was skipped and the form posted anyway. Each of those
+    cost a full browser session and was recorded as a crash.
+
+    Checking before the click turns that into an honest, immediate answer.
+    Covers WPForms, Gravity Forms and plain required= markup; a select still
+    showing its placeholder option counts as empty. Checkboxes and radios are
+    skipped: the callers tick those themselves.
+    """
+    js = r"""
+var out = [];
+var sel = "input[required],select[required],textarea[required]," +
+          ".wpforms-field-required input,.wpforms-field-required select," +
+          ".gfield_contains_required input,.gfield_contains_required select";
+document.querySelectorAll(sel).forEach(function (e) {
+    if (e.offsetParent === null) { return; }
+    if (e.type === 'checkbox' || e.type === 'radio') { return; }
+    var v = (e.value || '').trim();
+    var empty = !v;
+    if (!empty && e.tagName === 'SELECT') {
+        var o = e.options[e.selectedIndex] || {};
+        if (/^\s*(---|select |choose |please )/i.test(o.text || '')) { empty = true; }
+    }
+    if (!empty) { return; }
+    var f = e.closest('.wpforms-field,.gfield,.form-group,li,div');
+    var l = f ? ((f.querySelector('label') || {}).innerText || '') : '';
+    l = (l || e.name || e.id || 'field').trim().replace(/\s+/g, ' ').slice(0, 50);
+    if (out.indexOf(l) < 0) { out.push(l); }
+});
+return out.slice(0, LIMIT);
+"""
+    try:
+        return page.run_js(js.replace("LIMIT", str(limit))) or []
+    except Exception:
+        return []
