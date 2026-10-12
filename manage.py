@@ -172,6 +172,42 @@ except Exception as _e:
     log.warning("DrissionPage timeout patch skipped (default 10s stays): %s", _e)
 
 
+# 2. Bound how long a captcha solve may hold a worker.
+#    twocaptcha's own defaults are defaultTimeout=120 and recaptchaTimeout=600
+#    — ten minutes for a single reCAPTCHA — and 122 broker scripts build their
+#    own TwoCaptcha(key) rather than going through lib.captcha, so setting it
+#    in one place would miss nearly all of them. Two or three solves at the
+#    stock ceiling is most of the 30-minute worker budget, which is how a
+#    worker ends up "stuck" without anything actually being wrong.
+#    Patching the class covers every construction, however the script does it.
+#    Same guard as above: if the installed client takes different kwargs, the
+#    patch stands down rather than breaking every solve.
+try:
+    import inspect as _inspect2
+    from twocaptcha import TwoCaptcha as _TC
+    _orig_tc_init = _TC.__init__
+    _TC_PARAMS = _inspect2.signature(_orig_tc_init).parameters
+    _TC_DEFAULTS = {
+        "defaultTimeout": float(os.getenv("CAPTCHA_TIMEOUT", "120")),
+        "recaptchaTimeout": float(os.getenv("CAPTCHA_RECAPTCHA_TIMEOUT", "180")),
+        "pollingInterval": float(os.getenv("CAPTCHA_POLL_INTERVAL", "5")),
+    }
+    _TC_APPLY = {k: v for k, v in _TC_DEFAULTS.items()
+                 if k in _TC_PARAMS or any(p.kind == p.VAR_KEYWORD for p in _TC_PARAMS.values())}
+    if not _TC_APPLY:
+        raise RuntimeError("TwoCaptcha.__init__ takes none of the timeout kwargs")
+
+    def _tc_init_with_timeouts(self, *a, **kw):
+        for _k, _v in _TC_APPLY.items():
+            kw.setdefault(_k, _v)
+        _orig_tc_init(self, *a, **kw)
+
+    _TC.__init__ = _tc_init_with_timeouts
+    log.info("captcha solve ceiling: %s", _TC_APPLY)
+except Exception as _e:
+    log.warning("twocaptcha timeout patch skipped (stock 600s reCAPTCHA ceiling stays): %s", _e)
+
+
 # ----- mirror print()/traceback output into the log file --------------------
 #
 # The 400 broker scripts narrate via print(), and __removal.py writes
