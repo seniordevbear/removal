@@ -1581,9 +1581,19 @@ def process_groups_removal():
             conn.close()
             conn = None
 
+            # 2026-10-12: cap the batch. The selection returns up to 1,000
+            # rows and the loop used to submit one per customer (~150) onto a
+            # 6-thread pool, so a tick could never finish inside its own
+            # timeout. A tick now dispatches only what the pool can plausibly
+            # work through; the rest stay step=0 and are picked up next tick,
+            # which costs nothing because selection is fair-shared per user.
+            max_batch = max(REMOVAL_CONCURRENCY * 4,
+                            _get_env_int("REMOVAL_MAX_BATCH", 24))
             futures = []
             data_dispatched = []
             for row in data:
+                if len(futures) >= max_batch:
+                    break
                 user_id_str = str(row["user_id"])
                 now_ts = time.time()
                 last_ts = last_removal_processed_at.get_value(user_id_str)
@@ -1606,27 +1616,42 @@ def process_groups_removal():
                         log.error("removal worker crashed: %r", f.exception())
                 if pending:
                     # 2026-10-10: a worker that never returns used to freeze the
-                    # loop for good. Give up waiting, release its customer slot
-                    # and mark the row so it is retried; the thread is left to
-                    # finish or die on its own (the chrome reaper kills its
-                    # browser after 180 min).
-                    log.error("removal: %d worker(s) still running after %.0fs — abandoning the wait",
-                              len(pending), row_timeout)
+                    # loop for good, so the wait is bounded.
+                    #
+                    # 2026-10-12: but "pending" is not "running". A tick submits
+                    # one row per customer — up to 150 — onto a 6-thread pool,
+                    # so most of them are still QUEUED when the timeout fires.
+                    # The first version blamed all of them equally and wrote 98
+                    # rows as failed on brokers that had never been opened
+                    # (43 of them spglobalcom). Separate the two cases: a future
+                    # that can still be cancelled never started, so it simply
+                    # goes back to the queue; only one that refuses to cancel is
+                    # genuinely stuck inside a broker and counts as a failure.
                     rows_by_future = dict(zip(futures, data_dispatched))
+                    requeued = stuck = 0
                     for f in pending:
                         row = rows_by_future.get(f)
                         if not row:
                             continue
+                        never_started = f.cancel()
                         with _inflight_lock:
                             _inflight_users.discard(str(row["user_id"]))
                         try:
                             c2 = _db_connect()
                             try:
-                                _set_step(c2, row["id"], 3, "worker timeout after %ds on %s" % (row_timeout, row["target_domain"]))
+                                if never_started:
+                                    _set_step(c2, row["id"], 0)
+                                    requeued += 1
+                                else:
+                                    _set_step(c2, row["id"], 3,
+                                              "worker timeout after %ds on %s" % (row_timeout, row["target_domain"]))
+                                    stuck += 1
                             finally:
                                 c2.close()
                         except Exception:
-                            log.exception("could not mark timed-out row id=%s", row.get("id"))
+                            log.exception("could not settle pending row id=%s", row.get("id"))
+                    log.warning("removal: tick ran out of time after %.0fs — %d row(s) stuck in a broker, "
+                                "%d still queued and put back", row_timeout, stuck, requeued)
         except Exception:
             log.exception("removal tick failed")
         finally:
