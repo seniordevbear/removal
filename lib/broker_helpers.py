@@ -1676,6 +1676,8 @@ var sel = "input[required],select[required],textarea[required]," +
 document.querySelectorAll(sel).forEach(function (e) {
     if (e.offsetParent === null) { return; }
     if (e.type === 'checkbox' || e.type === 'radio') { return; }
+    var who = ((e.name || '') + ' ' + (e.id || '') + ' ' + (e.className || '')).toLowerCase();
+    if (/captcha|recaptcha|hcaptcha|turnstile/.test(who)) { return; }
     var v = (e.value || '').trim();
     var empty = !v;
     if (!empty && e.tagName === 'SELECT') {
@@ -1686,6 +1688,7 @@ document.querySelectorAll(sel).forEach(function (e) {
     var f = e.closest('.wpforms-field,.gfield,.form-group,li,div');
     var l = f ? ((f.querySelector('label') || {}).innerText || '') : '';
     l = (l || e.name || e.id || 'field').trim().replace(/\s+/g, ' ').slice(0, 50);
+    if (/captcha/i.test(l)) { return; }
     if (out.indexOf(l) < 0) { out.push(l); }
 });
 return out.slice(0, LIMIT);
