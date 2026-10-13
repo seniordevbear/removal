@@ -478,6 +478,12 @@ _US_STATE_FULL = {
     "SC": "South Carolina", "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas",
     "UT": "Utah", "VT": "Vermont", "VA": "Virginia", "WA": "Washington",
     "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+    # US territories. Customers live in them (users 893 and 894 are in Palmas
+    # Del Mar, PR) and the opt-out dropdowns list them, but without these a PR
+    # profile looked exactly like a foreign address and was turned away as
+    # missing data.
+    "PR": "Puerto Rico", "VI": "Virgin Islands", "GU": "Guam",
+    "AS": "American Samoa", "MP": "Northern Mariana Islands",
 }
 
 
@@ -529,6 +535,30 @@ def user_age(dataRow):
     raise missing_pii("Birth Year")
 
 
+def require_us_state(raw):
+    """Canonical US state name, or missing_pii if the profile has none.
+
+    These are US state dropdowns. A profile holding "County Durham" (a UK
+    county, 6 attempts on texasarrests.org on 12 Oct) or "Germany" can never
+    match an option, so treating it as a broker failure buys a retry every day
+    forever and files it under "the script is broken". It is a data gap, and
+    step=5 is where a human will see it.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        raise missing_pii("State")
+    if len(raw) == 2 and raw.upper() in _US_STATE_FULL:
+        return _US_STATE_FULL[raw.upper()]
+    # Profiles are typed by hand: "california", "NEW YORK", "new  mexico".
+    # Compare on a case- and space-folded key so only genuinely non-US values
+    # fall through.
+    key = re.sub(r"\s+", " ", raw).strip().lower()
+    for full in _US_STATE_ABBREV:
+        if full.lower() == key:
+            return full
+    raise missing_pii("State")
+
+
 def state_abbrev(raw):
     """Two-letter state code from whatever the profile holds.
 
@@ -540,14 +570,13 @@ def state_abbrev(raw):
     instead of KeyError: ''.
     """
     raw = (raw or "").strip()
-    if not raw:
-        raise missing_pii("State")  # step=5, not a retried crash — see missing_pii()
     if len(raw) == 2 and raw.upper() in _US_STATE_FULL:
         return raw.upper()
-    ab = _US_STATE_ABBREV.get(raw.title())
-    if ab:
-        return ab
-    raise ValueError("unrecognized US state %r" % raw)
+    # Everything else goes through the one normaliser, which folds case and
+    # spacing ("new  mexico") and raises missing_pii for an empty or non-US
+    # value. It used to raise ValueError -> step=3 "the script failed", which
+    # bought a daily retry for a profile that can never match a US dropdown.
+    return _US_STATE_ABBREV[require_us_state(raw)]
 
 
 def select_state(select_ele, raw, timeout=4.0):
@@ -560,8 +589,7 @@ def select_state(select_ele, raw, timeout=4.0):
     disagreed (seen live on addresssearchcom, 46 scripts affected).
     Tries text and value for both spellings before giving up loudly."""
     raw = (raw or "").strip()
-    if not raw:
-        raise missing_pii("State")  # see missing_pii()
+    require_us_state(raw)  # non-US profiles are a data gap, not a broker fault
     cands = [raw]
     full = _state_full_name(raw)
     if full not in cands:
@@ -1473,9 +1501,7 @@ def click_label_text(page, text, timeout=4):
 def mine_select_state(page, raw):
     """Mine dropdowns: click the state label, then the <li data-label=Full Name>."""
     from time import sleep
-    full = _state_full_name(raw) or (raw or "").strip()
-    if not full:
-        raise missing_pii("State")
+    full = require_us_state(raw)
     lab = page.ele("tag:label@@for=dropdown-state-field", timeout=6)
     if not lab:
         raise RuntimeError("state dropdown not on this form")

@@ -203,6 +203,33 @@ try:
         _orig_tc_init(self, *a, **kw)
 
     _TC.__init__ = _tc_init_with_timeouts
+
+    # hCaptcha is slower than the image captchas defaultTimeout was sized for,
+    # and the client does not give it the longer reCAPTCHA ceiling, so it ran
+    # against the 120s default and lost: truepeoplesearchcom timed out fifteen
+    # times on 12 Oct, every one at "timeout 120.0 exceeded", while ordinary
+    # solves that night came back in eleven seconds. Raising defaultTimeout for
+    # everything would hold workers on doomed image solves too, so the longer
+    # ceiling is given to hCaptcha alone. Done by raising the attribute around
+    # the call rather than passing a kwarg, so it does not depend on what
+    # solve() happens to accept in the installed version.
+    _HC_TIMEOUT = float(os.getenv("CAPTCHA_HCAPTCHA_TIMEOUT", "240"))
+    if hasattr(_TC, "hcaptcha"):
+        _orig_hcaptcha = _TC.hcaptcha
+
+        def _hcaptcha_with_longer_ceiling(self, *a, **kw):
+            _was = getattr(self, "defaultTimeout", None)
+            try:
+                if _was is not None and _was < _HC_TIMEOUT:
+                    self.defaultTimeout = _HC_TIMEOUT
+                return _orig_hcaptcha(self, *a, **kw)
+            finally:
+                if _was is not None:
+                    self.defaultTimeout = _was
+
+        _TC.hcaptcha = _hcaptcha_with_longer_ceiling
+        _TC_APPLY["hcaptchaTimeout"] = _HC_TIMEOUT
+
     log.info("captcha solve ceiling: %s", _TC_APPLY)
 except Exception as _e:
     log.warning("twocaptcha timeout patch skipped (stock 600s reCAPTCHA ceiling stays): %s", _e)
