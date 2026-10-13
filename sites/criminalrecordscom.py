@@ -5,6 +5,7 @@ import random
 import os, datetime, pyautogui, requests, sys
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
+from lib.broker_helpers import unique_shot_path
 
 api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
 solver = TwoCaptcha(api_key)
@@ -76,7 +77,7 @@ def criminalrecordscom(dataRow, website_name, in_user_email, run_mode) :
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
-        screenshot_save_path = screentShotDir + "\CriminalrecordsCom_" + fName + "-" + lName + ".png"
+        screenshot_save_path = unique_shot_path(screentShotDir, "CriminalrecordsCom", fName, lName)
         
         arguments = [
             "-no-first-run",

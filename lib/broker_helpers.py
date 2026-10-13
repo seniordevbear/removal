@@ -131,6 +131,31 @@ def screenshot_step(page, broker: str, step: str, base_dir: Optional[str] = None
         return None
 
 
+def unique_shot_path(shot_dir, label, first_name, last_name):
+    """Build the legacy per-broker screenshot path, with a unique suffix.
+
+    183 of the older broker scripts named their screenshot after the customer
+    alone - ScreenShot/<date>/SpokeoCom_Christopher-Mayes.png. Two customers
+    who share a name (users 893 and 894 are both Christopher Mayes, and both
+    ran on 2026-10-12) write the same file, and whichever worker finishes last
+    owns it: one customer's filled form becomes the other's evidence. That is
+    the 2026-10-02 cross-filing incident, which shot() was fixed for and these
+    scripts were not - 675 (filename, broker) pairs are still shared by more
+    than one customer.
+
+    Same shape as shot(): thread name, microseconds and a random suffix, so no
+    two attempts can collide however many workers are on the same broker.
+    """
+    import threading as _th, uuid as _uuid
+    stamp = "%s_%s_%s" % (
+        datetime.datetime.now().strftime("%H%M%S_%f"),
+        re.sub(r"[^A-Za-z0-9]+", "", _th.current_thread().name)[-12:] or "main",
+        _uuid.uuid4().hex[:6],
+    )
+    name = re.sub(r"[^A-Za-z0-9_-]+", "", "%s-%s" % (first_name, last_name))
+    return os.path.join(shot_dir, "%s_%s_%s.png" % (label, name, stamp))
+
+
 def find_input(page, *candidates: str, timeout: float = 5.0):
     """Try each candidate selector in order. Returns the first non-None
     match. Raises ValueError listing all candidates that failed.

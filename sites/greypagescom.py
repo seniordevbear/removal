@@ -4,6 +4,7 @@ import json
 import random
 import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
+from lib.broker_helpers import unique_shot_path
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -86,7 +87,7 @@ def greypagescom(dataRow, website_name, in_user_email, run_mode) :
 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\GreyPagesCom_" + fName + "-" + lName + ".png"
+        screenshot_save_path = unique_shot_path(screentShotDir, "GreyPagesCom", fName, lName)
         
         arguments = [
             "-no-first-run",

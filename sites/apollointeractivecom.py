@@ -5,6 +5,7 @@ import random
 import os, datetime, pyautogui, sys, requests
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
+from lib.broker_helpers import unique_shot_path
 
 
 now = datetime.datetime.now()
@@ -134,7 +135,7 @@ def apollointeractivecom(dataRow, website_name, in_user_email, run_mode) :
         
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\ApolloInteractiveCom_" + fName + "-" + lName + ".png"
+        screenshot_save_path = unique_shot_path(screentShotDir, "ApolloInteractiveCom", fName, lName)
 
         arguments = [
             "-no-first-run",

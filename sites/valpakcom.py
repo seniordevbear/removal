@@ -4,6 +4,8 @@ import json
 import random
 import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
+from lib.broker_helpers import find_input, missing_pii, submission_verdict
+from lib.broker_helpers import unique_shot_path
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -40,60 +42,67 @@ def _human_type2(element , text: str) -> None:
 
         sleep(random.uniform(0.05, 0.1))
 
-def fill_input_data(page, dataRow) : 
+def _vuetify_field(page, *labels):
+    """Find a Vuetify text field by the text of its <label>, falling back to
+    placeholder, aria-label and name.
+
+    This form's inputs carry Nuxt-generated ids - input-59, input-62, input-65
+    when the script was written; input-1589539 and input-1589551 when the page
+    was fetched on 2026-10-13. The number is a per-render counter, so hardcoding
+    it can only ever work until the next deploy. It failed 46 times on
+    2026-10-12. The label text is the part that is actually stable.
+    """
+    cands = []
+    for lab in labels:
+        cands.append("xpath://label[contains(normalize-space(.), %r)]/"
+                     "following::input[1]" % lab)
+        cands.append("xpath://input[@aria-label=%r]" % lab)
+        cands.append("xpath://input[@placeholder=%r]" % lab)
+        cands.append("xpath://input[@name=%r]" % lab.lower().replace(" ", ""))
+    try:
+        return find_input(page, *cands, timeout=4.0)
+    except ValueError:
+        raise RuntimeError(
+            "valpakcom: no field for %s on the privacy-center form - the DOM "
+            "has changed and needs re-capturing with capture_forms.py"
+            % " / ".join(repr(l) for l in labels))
+
+
+def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
+    # The form asks for a postal address, so refuse before typing rather than
+    # submitting a half-empty request the broker will drop.
+    missing = [k for k in ("Address", "City", "Zipcode")
+               if not str(dataRow.get(k) or "").strip()]
+    if missing:
+        raise missing_pii(*missing)
+
     sleep(1)
 
-    fName_input = page.ele("tag:input@@id=input-59")
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
+    for labels, value in (
+        (("First Name", "First name"), fName),
+        (("Last Name", "Last name"), lName),
+        (("Email", "Email Address"), generate_email(dataRow["Name"])),
+        (("Phone", "Phone Number"), generate_phone_number()),
+        (("Address", "Street Address"), str(dataRow["Address"])),
+        (("City",), str(dataRow["City"])),
+        (("Zip", "Zip Code", "Postal Code"), str(dataRow["Zipcode"])),
+    ):
+        el = _vuetify_field(page, *labels)
+        el.click()
+        print("typing %s..." % labels[0].lower())
+        sleep(random.uniform(0.1, 0.5))
+        _human_type2(el, value)
 
-
-    lName_input = page.ele("tag:input@@id=input-62")
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    email_input = page.ele("tag:input@@id=input-65")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
-
-    phone_input = page.ele("tag:input@@id=input-68")
-    phone_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, generate_phone_number())
-
-
-    address_input = page.ele("tag:input@@id=input-71")
-    address_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
-
-
-    city_input = page.ele("tag:input@@id=input-74")
-    city_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(city_input, dataRow["City"])
-
-    zip_input = page.ele("tag:input@@id=input-77")
-    zip_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
 
 def valpakcom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\ValpakCom_" + fName + "-" + lName + ".png"
+        screenshot_save_path = unique_shot_path(screentShotDir, "ValpakCom", fName, lName)
         
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
         errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
@@ -114,7 +123,11 @@ def valpakcom(dataRow, website_name, in_user_email, run_mode) :
             options.headless()
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        page.get("https://valpak.com/cpa/california")
+        # /cpa/california 302-redirects to /privacy-center (checked 2026-10-13);
+        # going to the old path landed on the coupon homepage, whose only text
+        # inputs are the "Find your savings" boxes - which is why the field
+        # lookups found nothing.
+        page.get("https://valpak.com/privacy-center")
 
         fill_input_data(page, dataRow)
 

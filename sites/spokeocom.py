@@ -4,7 +4,9 @@ import json
 import random
 import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
+from lib.broker_helpers import missing_pii, submission_verdict, unique_shot_path
 import re
+from urllib.parse import urlencode
 from cloudsolver.extension import proxies
 from twocaptcha import TwoCaptcha
 
@@ -51,10 +53,11 @@ def spokeocom(dataRow, website_name, in_user_email, run_mode) :
         
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\SpokeoCom_" + fName + "-" + lName + ".png"
-
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
+        # Two customers can share a name - users 893 and 894 are both
+        # Christopher Mayes and both ran spokeo on 2026-10-12 - so the name
+        # alone is not a unique filename. unique_shot_path adds thread name,
+        # microseconds and a random suffix, the same way shot() does.
+        screenshot_save_path = unique_shot_path(screentShotDir, "SpokeoCom", fName, lName)
                 
         arguments = [
             "-no-first-run",
@@ -92,9 +95,42 @@ def spokeocom(dataRow, website_name, in_user_email, run_mode) :
         if run_mode == "headless" :
             options.headless()
         
+        # A search with no city, no state and no usable phone returns everyone
+        # in the country with this name, and the code below opts out whichever
+        # profile happens to sort first. On 2026-10-12 eleven of thirty-two
+        # searches ran that way (phone=+1, city=, state=), so the "removal" was
+        # a coin toss that could just as easily have de-listed a stranger.
+        # Refuse the search instead; step 5 asks for the data we are missing.
+        city = (dataRow.get("City") or "").strip()
+        state = (dataRow.get("State") or "").strip()
+        phone_digits = re.sub(r"\D", "", str(dataRow.get("Phone Number") or ""))
+        if phone_digits.startswith("1"):
+            phone_digits = phone_digits[1:]
+        has_phone = len(phone_digits) == 10
+
+        if not (city and state) and not has_phone:
+            missing = []
+            if not city:
+                missing.append("City")
+            if not state:
+                missing.append("State")
+            if not has_phone:
+                missing.append("Phone Number")
+            raise missing_pii(*missing)
+
+        params = {}
+        if city:
+            params["city"] = city
+        if state:
+            params["state"] = state
+        if has_phone:
+            params["phone"] = "+1" + phone_digits
+
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        url = f"https://www.spokeo.com/search/{fName}-{lName}?city={dataRow["City"]}&phone={dataRow["Phone Number"]}&state={dataRow["State"]}"
+        url = "https://www.spokeo.com/search/%s-%s" % (fName, lName)
+        if params:
+            url += "?" + urlencode(params)
         print(url)
         page.get(url)
 
@@ -102,20 +138,35 @@ def spokeocom(dataRow, website_name, in_user_email, run_mode) :
 
         sleep(10)
 
-        current_year = now.year
-        print(current_year)
-        birth_year = dataRow["Birth Year"]
-        print(birth_year)
-        age = int(current_year) - int(birth_year)
-        print(age)
+        # `age` was computed from Birth Year, printed, and then never read.
+        # An empty Birth Year therefore threw ValueError("invalid literal for
+        # int() with base 10: ''") and failed the whole removal for a number
+        # nothing used - 95 times on 2026-10-12 alone. Keep it as a log line
+        # when we have it, and carry on when we do not.
+        birth_year = str(dataRow.get("Birth Year") or "").strip()
+        if birth_year.isdigit():
+            print("age about %d" % (now.year - int(birth_year)))
+        else:
+            print("no birth year on file; cannot narrow by age")
 
-        search_result_div = page.ele("tag:div@@id=name-search-results-list")
-        print(search_result_div)
+        search_result_div = page.ele("tag:div@@id=name-search-results-list", timeout=15)
+        if not search_result_div:
+            raise RuntimeError(
+                "spokeocom: no search-results list on the page for %s %s "
+                "(blocked, captcha, or layout change)" % (fName, lName))
         rows = search_result_div.eles("tag:div@@role=listitem")
 
-        profile_url = ""
-        print(len(rows))
-        if len(rows) > 0 :
+        # Until now an empty result list skipped the whole opt-out and fell
+        # straight into the "Success Confirmation" block below, which took a
+        # screenshot of the empty search page and returned it as a completed
+        # removal. Nothing was ever submitted on those runs.
+        print("%d candidate profiles" % len(rows))
+        if not rows:
+            raise RuntimeError(
+                "spokeocom: no profile matched %s %s with the location we hold "
+                "- nothing was submitted" % (fName, lName))
+
+        if True:
             profile_url = rows[0].ele("tag:a").attr("href")
             print(profile_url)
             sleep(1)
@@ -167,7 +218,10 @@ def spokeocom(dataRow, website_name, in_user_email, run_mode) :
                 print(result["code"])
                 Code = result["code"]
             except Exception as e:
-                print("Error: ", str(e))
+                # Without this the failed solve fell through to _human_type2(..., Code)
+                # and raised NameError, which reads as a code bug rather than
+                # "2captcha could not solve it".
+                raise RuntimeError("spokeocom: audio captcha not solved: %s" % e)
             audio_reponse_input = iframe_container1.ele("tag:input@@id=audio-response")
             _human_type2(audio_reponse_input, Code)
 
@@ -178,26 +232,33 @@ def spokeocom(dataRow, website_name, in_user_email, run_mode) :
 
             submit_button = page.ele("tag:button@@text()=OPT OUT")
             submit_button.click()
-        
+
+            # The click alone was treated as proof. Read the rendered page and
+            # let it say so, the same way the other round-6 scripts do.
+            submission_verdict(
+                page, "spokeocom",
+                success_phrases=(
+                    "we have received your opt out request",
+                    "check your email",
+                    "confirmation email",
+                    "opt out request",
+                ),
+            )
+
         sleep(1)
-       
+
         try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(5)
             page.get_screenshot(screenshot_save_path)
         except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
+            print("screenshot failed: ", str(e))
         
     except Exception as e:
         print(e)
         try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
+            if page is not None:
+                page.get_screenshot(screenshot_save_path)
+        except Exception as e2:
+            print("failure screenshot failed: ", str(e2))
         raise
 
     finally:

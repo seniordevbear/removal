@@ -7,6 +7,7 @@ from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
 from cloudsolver.extension import proxies
 from lib.broker_helpers import select_onetrust_state, select_onetrust_country, solve_image_captcha_element
+from lib.broker_helpers import unique_shot_path
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -130,7 +131,7 @@ def affinitysolutionscom(dataRow, website_name, in_user_email, run_mode) :
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
-        screenshot_save_path = screentShotDir + "\AffinitySolutionsCom_" + fName + "-" + lName + ".png"
+        screenshot_save_path = unique_shot_path(screentShotDir, "AffinitySolutionsCom", fName, lName)
         
         arguments = [
             "-no-first-run",

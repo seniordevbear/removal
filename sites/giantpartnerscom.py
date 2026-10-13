@@ -5,6 +5,7 @@ import random
 import os, datetime, pyautogui, sys, requests
 
 from twocaptcha import TwoCaptcha
+from lib.broker_helpers import unique_shot_path
 
 apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
 solver = TwoCaptcha(apiKey)
@@ -101,7 +102,7 @@ def giantpartnerscom(dataRow, website_name, in_user_email, run_mode) :
 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\GiantPartnersCom_" + fName + "-" + lName + ".png"
+        screenshot_save_path = unique_shot_path(screentShotDir, "GiantPartnersCom", fName, lName)
         arguments = [
             "-no-first-run",
             "--start-maximized",

@@ -9,6 +9,7 @@ from lib.common import generate_email, generate_phone_number
 from DrissionPage.common import Keys
 from lib.email_verification import do_email_verification
 from lib.broker_helpers import user_age
+from lib.broker_helpers import unique_shot_path
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -57,7 +58,7 @@ def courtcasefindercom(dataRow, website_name, in_user_email, run_mode) :
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
         errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-        screenshot_save_path = screentShotDir + "\CourtcasefinderCom_" + fName + "-" + lName + ".png"
+        screenshot_save_path = unique_shot_path(screentShotDir, "CourtcasefinderCom", fName, lName)
         arguments = [
             "-no-first-run",
             "--start-maximized",

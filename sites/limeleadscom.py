@@ -5,6 +5,7 @@ import random, requests
 import os, datetime, pyautogui, sys
 from twocaptcha import TwoCaptcha
 from lib.common import generate_email, generate_phone_number
+from lib.broker_helpers import unique_shot_path
 
 api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
 solver = TwoCaptcha(api_key)
@@ -90,7 +91,7 @@ def limeleadscom(dataRow, website_name, in_user_email, run_mode) :
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\LimeLeadsCom_" + fName + "-" + lName + ".png"
+        screenshot_save_path = unique_shot_path(screentShotDir, "LimeLeadsCom", fName, lName)
         
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
         errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"

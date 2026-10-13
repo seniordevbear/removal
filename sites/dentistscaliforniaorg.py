@@ -6,6 +6,7 @@ import os, datetime, pyautogui, requests, sys
 from lib.common import generate_email, generate_phone_number
 from lib.email_sender import send_email
 import re
+from lib.broker_helpers import unique_shot_path
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -56,7 +57,7 @@ def dentistscaliforniaorg(dataRow, website_name, in_user_email, run_mode) :
 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\DentistscaliforniaOrg_" + fName + "-" + lName + ".png"
+        screenshot_save_path = unique_shot_path(screentShotDir, "DentistscaliforniaOrg", fName, lName)
         
         arguments = [
             "-no-first-run",

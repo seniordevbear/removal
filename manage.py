@@ -408,6 +408,14 @@ db_config = {
     # hours inside a DB call after the managed database dropped connections
     # (18:15-18:49); the pure driver has no read timeout unless this is set.
     "connection_timeout": _get_env_int("DB_SOCKET_TIMEOUT", 120),
+    # 2026-10-13: mysql.connector defaults to autocommit=False, so every SELECT
+    # a worker ran opened a transaction that stayed open - holding its read view
+    # and its locks - until the next explicit commit. _claim_row is a one-row
+    # CAS by primary key, and it still hit "1205 Lock wait timeout exceeded"
+    # seven times on 12 Oct, each one pinning a worker for the full 50-second
+    # server default. Nothing here spans statements (one rollback in the whole
+    # file, inside _set_step's fallback), so autocommit is simply correct.
+    "autocommit": True,
 }
 # Only pass SSL options when a CA file is actually configured. Passing
 # ssl_ca="" made mysql-connector-python 9.x treat the empty string as a real
@@ -503,7 +511,18 @@ def _db_connect(attempts=3, backoff=2.0):
     last = None
     for i in range(attempts):
         try:
-            return mysql.connector.connect(**db_config)
+            conn = mysql.connector.connect(**db_config)
+            # A worker waiting out the 50s server default is a worker doing
+            # nothing. These statements are single-row writes; if one is
+            # contended, giving up quickly and retrying is strictly better.
+            try:
+                cur = conn.cursor()
+                cur.execute("SET SESSION innodb_lock_wait_timeout = %s"
+                            % _get_env_int("DB_LOCK_WAIT_TIMEOUT", 15))
+                cur.close()
+            except Exception:
+                log.warning("could not set innodb_lock_wait_timeout", exc_info=True)
+            return conn
         except Exception as e:  # InterfaceError / OperationalError / socket
             last = e
             if i < attempts - 1:
@@ -850,25 +869,36 @@ def get_pending_face_removal(conn):
     """)
 
 
-def _claim_row(conn, row_id, kind, require_planable=False):
+# MySQL: 1205 = lock wait timeout, 1213 = deadlock. Both mean "someone else was
+# mid-write on this row"; both are safe to simply try again.
+_RETRYABLE_DB_ERRNOS = (1205, 1213)
+
+
+def _claim_row(conn, row_id, kind, require_planable=False, attempts=3):
     """Atomic CAS: only sets step=1 if it's still step=0. Returns True on
-    successful claim, False if someone else got it first."""
-    cur = conn.cursor()
-    try:
-        if require_planable:
-            cur.execute(
-                "UPDATE results SET step = 1 WHERE id = %s AND step = 0 AND kind = %s AND planable = 1",
-                (row_id, kind),
-            )
-        else:
-            cur.execute(
-                "UPDATE results SET step = 1 WHERE id = %s AND step = 0 AND kind = %s",
-                (row_id, kind),
-            )
-        conn.commit()
-        return cur.rowcount == 1
-    finally:
-        cur.close()
+    successful claim, False if someone else got it first.
+
+    Contention used to escape as a DatabaseError, which aborted the whole row
+    with "removal outer row error" and left it unclaimed. Since the statement
+    is a single-row compare-and-set, a retry is the natural answer."""
+    sql = ("UPDATE results SET step = 1 WHERE id = %s AND step = 0 AND kind = %s"
+           + (" AND planable = 1" if require_planable else ""))
+    for i in range(attempts):
+        cur = conn.cursor()
+        try:
+            cur.execute(sql, (row_id, kind))
+            conn.commit()
+            return cur.rowcount == 1
+        except mysql.connector.Error as e:
+            if getattr(e, "errno", None) in _RETRYABLE_DB_ERRNOS and i < attempts - 1:
+                log.warning("claim contended on id=%s (%s) — retry %d/%d",
+                            row_id, getattr(e, "errno", "?"), i + 1, attempts - 1)
+                time.sleep(0.5 * (i + 1))
+                continue
+            raise
+        finally:
+            cur.close()
+    return False
 
 
 # ----- worker bodies --------------------------------------------------------

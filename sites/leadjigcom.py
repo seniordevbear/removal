@@ -6,6 +6,7 @@ import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
 from cloudsolver.extension import proxies
+from lib.broker_helpers import unique_shot_path
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -112,7 +113,7 @@ def leadjigcom(dataRow, website_name, in_user_email, run_mode) :
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name
         lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = screentShotDir + "\LeadjigCom_" + fName + "-" + lName + ".png"
+        screenshot_save_path = unique_shot_path(screentShotDir, "LeadjigCom", fName, lName)
         
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
         errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
