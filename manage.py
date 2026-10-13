@@ -512,6 +512,25 @@ def _db_connect(attempts=3, backoff=2.0):
     raise last
 
 
+def _why(exc, limit=200):
+    """Describe an exception well enough to diagnose it from the database.
+
+    Until now every broker crash was stored as the bare word "broker_raised".
+    The real message went to the VPS log only, so 421 failures in one night
+    were indistinguishable from each other on the server and each diagnosis
+    needed someone to upload a log. The exception type and its first line are
+    the part that identifies the fault, so they travel with the row.
+    """
+    try:
+        first = str(exc).strip().splitlines()
+        first = first[0].strip() if first else ""
+        name = type(exc).__name__
+        text = "%s: %s" % (name, first) if first else name
+        return ("broker_raised: " + text)[:limit]
+    except Exception:
+        return "broker_raised"
+
+
 def _set_step(conn, row_id, new_step, reason=None):
     """Single source of truth for step transitions. Parameterized.
 
@@ -891,9 +910,9 @@ def process_groups_google_scan():
                     _set_step(conn, row["id"], 4, "module_missing")
                 except IncompletePII as e:
                     _set_step(conn, row["id"], 5, "missing_pii:" + ",".join(e.args[0]))
-                except Exception:
+                except Exception as e:
                     log.exception("google_scan row failed id=%s", row["id"])
-                    _set_step(conn, row["id"], 3, "broker_raised")
+                    _set_step(conn, row["id"], 3, _why(e))
             except Exception:
                 log.exception("google_scan outer row error id=%s", row.get("id"))
     except Exception:
@@ -958,9 +977,9 @@ def process_groups():
                             _set_step(conn, row["id"], 4, "module_missing")
                         except IncompletePII as e:
                             _set_step(conn, row["id"], 5, "missing_pii:" + ",".join(e.args[0]))
-                        except Exception:
+                        except Exception as e:
                             log.exception("scan row failed id=%s", row["id"])
-                            _set_step(conn, row["id"], 3, "broker_raised")
+                            _set_step(conn, row["id"], 3, _why(e))
                     except Exception:
                         log.exception("scan outer row error id=%s", row.get("id"))
         except Exception:
@@ -1517,7 +1536,7 @@ def _process_removal_row(row):
             # away too — the loop spun as fast as the tick, not once per
             # pacing interval.
             last_removal_processed_at.set(user_id_str, time.time())
-        except Exception:
+        except Exception as e:
             log.exception("removal row failed id=%s", row["id"])
             crashes = _note_domain_crash(row["target_domain"])
             if crashes < DOMAIN_CRASHES_BEFORE_GIVEUP:
@@ -1526,7 +1545,7 @@ def _process_removal_row(row):
                          crashes, DOMAIN_CRASHES_BEFORE_GIVEUP,
                          row["target_domain"], row["id"])
             else:
-                _set_step(conn, row["id"], 3, "broker_raised")
+                _set_step(conn, row["id"], 3, _why(e))
             last_removal_processed_at.set(user_id_str, time.time())
     except Exception:
         log.exception("removal outer row error id=%s", row.get("id"))
@@ -1749,9 +1768,9 @@ def process_groups_face_removal():
                                     cur.close()
                             except Exception:
                                 log.exception("face_removal users update failed user=%s", row["user_id"])
-                        except Exception:
+                        except Exception as e:
                             log.exception("face_removal row failed id=%s", row["id"])
-                            _set_step(conn, row["id"], 3, "broker_raised")
+                            _set_step(conn, row["id"], 3, _why(e))
                     except Exception:
                         log.exception("face_removal outer row error id=%s", row.get("id"))
         except Exception:
