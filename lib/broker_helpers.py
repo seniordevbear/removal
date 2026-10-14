@@ -733,7 +733,20 @@ def _submit_arrests_contact_form(page, broker_name, base, dataRow):
         mail_el.click(); mail_el.input(reply_to)
         msg_el.click(); msg_el.input(body)
         time.sleep(0.5)
-        btn = page.ele("css:input[type=submit], css:button[type=submit]", timeout=3)
+        # One selector per call. The earlier form was
+        # "css:input[type=submit], css:button[type=submit]" - a comma list,
+        # which DrissionPage reads as a single (never matching) selector. The
+        # fallback therefore reported "contact form has no submit button" on
+        # every site that actually had one: 216 times on 14 Oct across
+        # oklahoma, nc, idaho, nd, vt, maryland, arizona and sd arrests.org,
+        # each after four portal GETs and a filled form. The live CF7 control
+        # is <input type="submit" class="wpcf7-submit">.
+        btn = None
+        for sel in ("css:input.wpcf7-submit", "css:input[type=submit]",
+                    "css:button[type=submit]", "css:button.wpcf7-submit"):
+            btn = page.ele(sel, timeout=2)
+            if btn:
+                break
         if not btn:
             log_step(broker_name, "contact form has no submit button", logging.WARNING)
             return False
@@ -855,6 +868,41 @@ def run_arrests_org_optout(broker_name, dataRow, run_mode="non-headless"):
                     "(/the-privacy-request-portal/, /privacy-request-portal, "
                     "/optout/, /request-portal) and no /contact-form — "
                     "site layout changed, script needs a survey")
+
+            # -- WPForms "Custom Captcha" (2026-10-14). Twenty-one portals in
+            #    the family now carry a required question field - "Enter all
+            #    the capital letters from this string: Ab4$DG2" - which the
+            #    form rejected as "Captcha *: This field is required" because
+            #    nothing filled it. WPForms puts the expected answer on the
+            #    input itself as data-a (seen on indianaarrests.org and
+            #    utaharrests.org), so that is used first; failing that the
+            #    question text is parsed for the two phrasings WPForms ships.
+            try:
+                cap = page.ele("css:.wpforms-field-captcha input[name$='[a]']", timeout=1.5)
+                if cap:
+                    answer = (cap.attr("data-a") or "").strip()
+                    if not answer:
+                        qtxt = ""
+                        qel = page.ele("css:.wpforms-field-captcha .wpforms-captcha-question", timeout=1)
+                        if qel:
+                            qtxt = (qel.text or "").strip()
+                        m = re.search(r"capital letters from this string:\s*(\S+)", qtxt, re.I)
+                        if m:
+                            answer = "".join(ch for ch in m.group(1) if ch.isupper())
+                        else:
+                            m = re.search(r"(\d+)\s*([+\-*x×])\s*(\d+)", qtxt)
+                            if m:
+                                a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
+                                answer = str(a + b if op == "+" else a - b if op == "-" else a * b)
+                    if answer:
+                        fill_field(page, "css:.wpforms-field-captcha input[name$='[a]']", answer,
+                                   broker=broker_name)
+                        log_step(broker_name, "custom captcha answered")
+                    else:
+                        log_step(broker_name, "custom captcha present but unreadable: %r" % qtxt,
+                                 logging.WARNING)
+            except Exception as e:
+                log_step(broker_name, "custom captcha step failed: %s" % e, logging.WARNING)
 
             # -- consent toggles: WPForms uses checkboxes, older layouts used
             #    radios. Try both input types for each concept; missing is a

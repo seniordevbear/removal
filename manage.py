@@ -86,6 +86,7 @@ from lib.broker_helpers import (
     CCPADailyLimitReached,
     ccpa_global_quota_reached,
     direct_send_quota_reached,
+    _US_STATE_FULL,
 )
 from __face_removal import face_removal
 from lib.automation_delay import enable_automation_delays
@@ -1219,8 +1220,7 @@ def _refresh_stale_row_pii():
         conn = _db_connect()
         cur = conn.cursor()
         try:
-            cur.execute(
-                "UPDATE results r JOIN users u ON u.id = r.user_id "
+            set_clause = (
                 "SET r.data = JSON_REMOVE(JSON_SET(COALESCE(r.data, '{}'), "
                 "  '$.email',     COALESCE(u.email, ''), "
                 "  '$.firstname', COALESCE(u.firstname, ''), "
@@ -1242,6 +1242,8 @@ def _refresh_stale_row_pii():
                 "  '$.address', COALESCE(u.address, '')"
                 "), '$.pii_requeues'), "
                 "r.step = 0 "
+            )
+            where = (
                 "WHERE r.kind = 1 AND r.step IN (0, 5) "
                 "  AND TRIM(COALESCE(u.firstname, '')) <> '' "
                 "  AND TRIM(COALESCE(u.lastname, '')) <> '' "
@@ -1251,11 +1253,12 @@ def _refresh_stale_row_pii():
                    "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
                    if REMOVAL_PAID_USERS_ONLY else "")
             )
-            n = cur.rowcount
-            conn.commit()
-            if n:
-                log.info("pii snapshot refresh: rebuilt data for %d row(s) "
-                         "from completed profiles", n)
+            _update_by_ids(
+                conn,
+                "SELECT r.id FROM results r JOIN users u ON u.id = r.user_id " + where, (),
+                "UPDATE results r JOIN users u ON u.id = r.user_id " + set_clause
+                + "WHERE r.id IN ({ids})",
+                "pii snapshot refresh")
         finally:
             cur.close()
     except Exception:
@@ -1280,36 +1283,63 @@ def _requeue_recovered_pii():
             # UPDATE with the join wrapped in a derived table. CAST(...) keeps
             # the counter an integer; ->> alone yields a string and `+ 1`
             # would coerce it to a double (2.0).
-            cur.execute(
-                "UPDATE results r "
-                "SET r.step = 0, "
-                "    r.data = JSON_SET(COALESCE(r.data, '{}'), "
-                "        '$.pii_requeues', "
-                "        CAST(COALESCE(r.data->>'$.pii_requeues', 0) "
-                "             AS UNSIGNED) + 1) "
-                "WHERE r.id IN (SELECT id FROM ("
-                "    SELECT r2.id FROM results r2 "
-                "      JOIN users u ON u.id = r2.user_id "
-                "    WHERE r2.kind = 1 AND r2.step = 5 "
-                "      AND TRIM(COALESCE(u.firstname, '')) <> '' "
-                "      AND TRIM(COALESCE(u.lastname, '')) <> '' "
-                # same gate as selection: only unpark rows the picker will
-                # actually use, so the bounded requeue budget isn't spent
-                # on rows for unpaid accounts that would sit at step=0.
-                + ("      AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
-                   "      AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
+            # Only unpark a row whose owner now HAS what it was parked for.
+            # 2026-10-14: the rule used to be "owner has a first and last
+            # name" - but a row parked as missing_pii:City,State is not
+            # recovered by a name. 2,780 rows carried a reason naming a
+            # field still empty on the profile, and all of them passed this
+            # test, so every hour 2,000 went back to step 0, were picked up,
+            # raised missing_pii again before opening a browser, and were
+            # parked again: ~1,400 step-5 transitions a day of pure churn
+            # (and the snapshot refresh above resets pii_requeues, so the
+            # counter never stopped it). The reason text names the fields;
+            # each named field must be non-empty on users before the row
+            # moves. "Captcha" is never customer data, so it always moves.
+            reason = "COALESCE(r2.data->>'$.pipeline_last_error', '')"
+            # "State" is only recovered by a US state: a profile reading
+            # "Germany" or "County Durham" is what parked the row in the
+            # first place (require_us_state), so it must not be the thing
+            # that unparks it. Codes and full names, upper-cased, from the
+            # same table the brokers use.
+            us_states = ", ".join(
+                "'%s'" % v.upper().replace("'", "''")
+                for v in list(_US_STATE_FULL.keys()) + list(_US_STATE_FULL.values()))
+            field_ok = (
+                "  AND ({r} = '' OR {r} NOT LIKE 'missing_pii:%' OR ("
+                "       ({r} NOT LIKE '%City%'       OR TRIM(COALESCE(u.city, '')) <> '') "
+                "   AND ({r} NOT LIKE '%State%'      OR UPPER(TRIM(COALESCE(u.state, ''))) IN ({us})) "
+                "   AND ({r} NOT LIKE '%Zip%'        OR TRIM(COALESCE(u.zip, '')) <> '') "
+                "   AND ({r} NOT LIKE '%Address%'    OR TRIM(COALESCE(u.address, '')) <> '') "
+                "   AND ({r} NOT LIKE '%Phone%'      OR TRIM(COALESCE(u.phone, '')) <> '') "
+                "   AND ({r} NOT LIKE '%Email%'      OR TRIM(COALESCE(u.email, '')) <> '') "
+                "   AND ({r} NOT LIKE '%Birth%'      OR u.birth_date IS NOT NULL OR COALESCE(u.age, 0) > 0) "
+                "   AND ({r} NOT LIKE '%Age%'        OR u.birth_date IS NOT NULL OR COALESCE(u.age, 0) > 0) "
+                "   )) "
+            ).format(r=reason, us=us_states)
+            # A reason of only "Captcha *" matches none of the field patterns
+            # and so passes on its own; "City,State,Captcha *" still needs the
+            # city and state. (An earlier draft let any mention of Captcha
+            # through, which would have unparked three rows still missing
+            # their address.)
+            select_sql = (
+                "SELECT r2.id FROM results r2 "
+                "  JOIN users u ON u.id = r2.user_id "
+                "WHERE r2.kind = 1 AND r2.step = 5 "
+                "  AND TRIM(COALESCE(u.firstname, '')) <> '' "
+                "  AND TRIM(COALESCE(u.lastname, '')) <> '' "
+                + field_ok
+                + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
+                   "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
                    if REMOVAL_PAID_USERS_ONLY else "")
-                +
-                "      AND CAST(COALESCE(r2.data->>'$.pii_requeues', 0) "
-                "               AS UNSIGNED) < %s "
-                "    LIMIT %s) x)",
-                (PII_REQUEUE_LIMIT, PII_REQUEUE_BATCH),
+                + "ORDER BY r2.id LIMIT %s"
             )
-            n = cur.rowcount
-            conn.commit()
-            if n:
-                log.info("pii recovery: requeued %d parked row(s) whose "
-                         "profile is now complete", n)
+            _update_by_ids(
+                conn, select_sql, (PII_REQUEUE_BATCH,),
+                "UPDATE results SET step = 0, "
+                "    data = JSON_SET(COALESCE(data, '{}'), '$.pii_requeues', "
+                "        CAST(COALESCE(data->>'$.pii_requeues', 0) AS UNSIGNED) + 1) "
+                "WHERE id IN ({ids}) AND step = 5",
+                "recovered-pii requeue")
         finally:
             cur.close()
     except Exception:
@@ -1340,30 +1370,26 @@ def _requeue_fixed_domains():
         try:
             # Derived table keeps MySQL happy about selecting from the table
             # being updated; LIMIT bounds each pass.
-            cur.execute(
-                "UPDATE results r "
-                "SET r.step = 0, "
-                "    r.data = JSON_SET(COALESCE(r.data, '{}'), '$.fixed_retry', 1) "
-                "WHERE r.id IN (SELECT id FROM ("
-                "    SELECT r2.id FROM results r2 "
-                "      JOIN users u ON u.id = r2.user_id "
-                "    WHERE r2.kind = 1 AND r2.step = 3 "
-                "      AND COALESCE(r2.data->>'$.fixed_retry', 0) = 0 "
+            select_sql = (
+                "SELECT r2.id FROM results r2 "
+                "  JOIN users u ON u.id = r2.user_id "
+                "WHERE r2.kind = 1 AND r2.step = 3 "
+                "  AND COALESCE(r2.data->>'$.fixed_retry', 0) = 0 "
                 + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
                    "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
-                   if REMOVAL_PAID_USERS_ONLY else "") +
-                "      AND EXISTS (SELECT 1 FROM results s "
-                "                  WHERE s.target_domain = r2.target_domain "
-                "                    AND s.kind = 1 AND s.step = 2 "
-                "                    AND s.updated_at > r2.updated_at) "
-                "    LIMIT %s) x)",
-                (PII_REQUEUE_BATCH,),
+                   if REMOVAL_PAID_USERS_ONLY else "")
+                + "  AND EXISTS (SELECT 1 FROM results s "
+                "              WHERE s.target_domain = r2.target_domain "
+                "                AND s.kind = 1 AND s.step = 2 "
+                "                AND s.updated_at > r2.updated_at) "
+                "ORDER BY r2.id LIMIT %s"
             )
-            n = cur.rowcount
-            conn.commit()
-            if n:
-                log.info("fixed-domain retry: requeued %d failed row(s) whose "
-                         "broker has succeeded since they failed", n)
+            _update_by_ids(
+                conn, select_sql, (PII_REQUEUE_BATCH,),
+                "UPDATE results SET step = 0, "
+                "    data = JSON_SET(COALESCE(data, '{}'), '$.fixed_retry', 1) "
+                "WHERE id IN ({ids}) AND step = 3",
+                "proven-fix retry")
         finally:
             cur.close()
     except Exception:
@@ -1395,39 +1421,34 @@ def _probe_dead_domains():
         conn = _db_connect()
         cur = conn.cursor()
         try:
-            cur.execute(
-                "UPDATE results r "
-                "SET r.step = 0, "
-                "    r.data = JSON_SET(COALESCE(r.data, '{}'), "
-                "        '$.probe_at', CAST(CURDATE() AS CHAR)) "
-                "WHERE r.id IN (SELECT id FROM ("
-                "    SELECT MIN(r2.id) AS id "
-                "    FROM results r2 JOIN users u ON u.id = r2.user_id "
-                "    WHERE r2.kind = 1 AND r2.step = 3 "
-                # one probe per DOMAIN per day: if any row of this domain
-                # already carries today's probe stamp, the domain is done
-                # for today (a per-row check would probe the domain's rows
-                # one after another all day).
-                "      AND NOT EXISTS (SELECT 1 FROM results p "
-                "          WHERE p.target_domain = r2.target_domain "
-                "            AND p.kind = 1 "
-                "            AND p.data->>'$.probe_at' "
-                "                = CAST(CURDATE() AS CHAR)) "
+            # The per-row NOT EXISTS on p.data->>'$.probe_at' had no usable
+            # index (it walked all kind=1 rows per candidate: 502k, measured).
+            # The set of domains probed today is tiny, so fetch it once.
+            select_sql = (
+                "SELECT MIN(r2.id) AS id "
+                "FROM results r2 JOIN users u ON u.id = r2.user_id "
+                "WHERE r2.kind = 1 AND r2.step = 3 "
+                "  AND r2.target_domain NOT IN ("
+                "      SELECT DISTINCT p.target_domain FROM results p "
+                "      WHERE p.kind = 1 AND p.step = 0 "
+                "        AND p.data->>'$.probe_at' = CAST(CURDATE() AS CHAR)) "
                 + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
                    "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
-                   if REMOVAL_PAID_USERS_ONLY else "") +
-                "      AND NOT EXISTS (SELECT 1 FROM results s "
-                "          WHERE s.target_domain = r2.target_domain "
-                "            AND s.kind = 1 AND s.step = 2 "
-                "            AND s.updated_at > NOW() - INTERVAL 7 DAY) "
-                "    GROUP BY r2.target_domain "
-                "    ORDER BY COUNT(*) DESC "
-                "    LIMIT 20) x)"
+                   if REMOVAL_PAID_USERS_ONLY else "")
+                + "  AND NOT EXISTS (SELECT 1 FROM results s "
+                "      WHERE s.target_domain = r2.target_domain "
+                "        AND s.kind = 1 AND s.step = 2 "
+                "        AND s.updated_at > NOW() - INTERVAL 7 DAY) "
+                "GROUP BY r2.target_domain "
+                "ORDER BY COUNT(*) DESC "
+                "LIMIT 20"
             )
-            n = cur.rowcount
-            conn.commit()
-            if n:
-                log.info("dead-domain probe: front-queued %d probe row(s)", n)
+            _update_by_ids(
+                conn, select_sql, (),
+                "UPDATE results SET step = 0, "
+                "    data = JSON_SET(COALESCE(data, '{}'), '$.probe_at', CAST(CURDATE() AS CHAR)) "
+                "WHERE id IN ({ids}) AND step = 3",
+                "dead-domain probe")
         finally:
             cur.close()
     except Exception:
@@ -1438,6 +1459,44 @@ def _probe_dead_domains():
                 conn.close()
             except Exception:
                 pass
+
+
+def _update_by_ids(conn, select_sql, select_params, update_sql, label, chunk=200):
+    """Select candidate ids with a plain (lock-free) SELECT, then UPDATE them
+    by primary key in small committed chunks.
+
+    2026-10-14: the four hourly maintenance statements were each written as
+    one UPDATE ... WHERE id IN (SELECT ...) or UPDATE ... JOIN. InnoDB locks
+    every row the WHERE examines for the life of the statement, and before
+    today's (kind, step, target_domain) index those walked the whole queue:
+    performance_schema showed the recovered-pii requeue averaging 137 s per
+    run and the fixed-retry one 28 s, once an hour each. During those
+    minutes every _claim_row in the workers waited on the same rows and
+    timed out - 235 "Lock wait timeout" failures on 14 Oct, spread evenly
+    across the day at the tick cadence - and the loop's "outer row error"
+    count was those claims giving up. A consistent-read SELECT takes no
+    locks; the UPDATE by id then holds only the rows it actually changes,
+    for milliseconds."""
+    cur = conn.cursor()
+    try:
+        cur.execute(select_sql, select_params)
+        ids = [r[0] for r in cur.fetchall()]
+    finally:
+        cur.close()
+    if not ids:
+        return 0
+    total = 0
+    for i in range(0, len(ids), chunk):
+        part = ids[i:i + chunk]
+        cur = conn.cursor()
+        try:
+            cur.execute(update_sql.replace("{ids}", ",".join(["%s"] * len(part))), tuple(part))
+            total += cur.rowcount
+            conn.commit()
+        finally:
+            cur.close()
+    log.info("%s: %d row(s) updated in %d chunk(s)", label, total, (len(ids) + chunk - 1) // chunk)
+    return total
 
 
 def maintenance_loop():
