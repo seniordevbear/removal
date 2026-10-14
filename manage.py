@@ -727,17 +727,53 @@ def _real_scan_domains():
     return _SCAN_MODULES_CACHE
 
 
+def _lead_user_ids(conn):
+    """Users with a front-page free scan still running (not yet notified).
+    A handful of rows via idx_free_scans_status_created; milliseconds."""
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT user_id FROM free_scans WHERE status <> 'notified'")
+        return {r[0] for r in cur.fetchall()}
+    finally:
+        cur.close()
+
+
 def get_pending_scan(conn):
+    """Pending scan rows, a lead's rows first.
+
+    2026-10-14: the batch came back in table order and the loop worked
+    through it serially, so a front-page free scan - a person watching a
+    spinner - sat behind whatever customer re-scans were in the same batch.
+    Across all 28 free scans ever run the average wait to a finished result
+    was 281s; the sites answer in about 20s when they run at once.
+
+    The sort is done here, not in SQL. results has no index that covers
+    (kind, step), so the SELECT below already walks ~500k rows on
+    idx_results_admin_queue - 13 seconds, measured - and an ORDER BY on top
+    added a filesort over the same rows (22 seconds). Fetching the lead ids
+    separately costs nothing, and a stable sort keeps the rest in table order.
+    """
     domains = _real_scan_domains()
     if not domains:
         return []
     placeholders = ",".join(["%s"] * len(domains))
-    return _fetch_pending(conn, """
+    rows = _fetch_pending(conn, """
         SELECT t.*, u.email, u.firstname, u.lastname, u.city, u.zip, u.state, u.age
         FROM (SELECT * FROM results WHERE step = 0 AND kind = 0
                 AND target_domain IN (""" + placeholders + """) LIMIT 1000) AS t
         LEFT JOIN users u ON t.user_id = u.id
     """, tuple(domains))
+    if not rows:
+        return rows
+    try:
+        leads = _lead_user_ids(conn)
+    except Exception:
+        log.exception("free_scans lookup failed; scanning in table order")
+        return rows
+    if not leads:
+        return rows
+    rows.sort(key=lambda r: 0 if r["user_id"] in leads else 1)
+    return rows
 
 
 _CCPA_DOMAINS_CACHE = None
@@ -992,7 +1028,19 @@ def process_groups():
             data = get_pending_scan(conn)
             if data:
                 log.info("scan tick: %d rows", len(data))
-                for row in data:
+                batch_users = {r["user_id"] for r in data}
+                for i, row in enumerate(data):
+                    # Every few rows, see whether a new lead has arrived whose
+                    # rows are not in this batch. If one has, stop here: the
+                    # rest of the batch is still step=0 and is picked up next
+                    # tick, behind the lead. One cheap indexed query.
+                    if i and i % 5 == 0:
+                        try:
+                            if _lead_user_ids(conn) - batch_users:
+                                log.info("scan tick: new lead arrived, re-fetching after %d rows", i)
+                                break
+                        except Exception:
+                            log.exception("lead check failed; continuing batch")
                     try:
                         # Policy May 2026: we used to upfront-reject any row
                         # whose user was missing city/zip/state/age and set
