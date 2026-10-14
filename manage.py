@@ -1185,6 +1185,62 @@ def _reap_old_chrome():
                     killed, CHROME_MAX_AGE_MINUTES)
 
 
+def _reap_all_chrome_at_startup():
+    """At startup nothing legitimate is running, so every chrome process is a
+    leftover from the run that was just killed.
+
+    2026-10-14 22:00 restart: six workers claimed six rows within a second
+    and not one of them logged a browser line in the next 25 minutes - no
+    "chromium started", no GET, nothing - while the DB showed the six rows
+    claimed and untouched. The previous manage.py had been killed with its
+    browsers still open; those survive their parent on Windows, and a fresh
+    ChromiumPage() against ports and profile dirs they still hold can wait
+    forever (capture_forms.py grew a 120 s launch guard for exactly this).
+    The hourly reaper only kills browsers older than CHROME_MAX_AGE_MINUTES,
+    so it would not have touched them for three hours.
+    """
+    try:
+        import psutil
+    except ImportError:
+        log.warning("startup chrome sweep: psutil not installed; skipping")
+        return
+    killed = 0
+    for proc in psutil.process_iter(["name"]):
+        try:
+            if (proc.info["name"] or "").lower().startswith("chrome"):
+                proc.kill()
+                killed += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:
+            log.exception("startup chrome sweep: error on pid %s", getattr(proc, "pid", "?"))
+    log.info("startup chrome sweep: killed %d leftover chrome process(es)", killed)
+
+
+def _dump_all_threads(reason):
+    """Write every thread's stack to logs/stall-<timestamp>.txt and the log.
+
+    Without this, a hang is a blank log: on 14 Oct the only evidence was
+    rows claimed and never finished. With it, the next one names the exact
+    line each worker is waiting on."""
+    import traceback
+    try:
+        # sys._current_frames + threading.enumerate rather than faulthandler:
+        # faulthandler prints thread ids only, and the names - removal-worker_2,
+        # ThreadPoolExecutor-0_4 - are the part that says which loop is stuck.
+        names = {t.ident: t.name for t in threading.enumerate()}
+        path = os.path.join(_LOG_DIR, "stall-%s.txt" % time.strftime("%Y%m%d-%H%M%S"))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("%s\n\n" % reason)
+            for ident, frame in sys._current_frames().items():
+                fh.write("=== thread %s (%s)\n" % (names.get(ident, "?"), ident))
+                fh.write("".join(traceback.format_stack(frame)))
+                fh.write("\n")
+        log.critical("%s - thread stacks written to %s", reason, path)
+    except Exception:
+        log.exception("could not write thread dump")
+
+
 # Rows parked at step=5 (missing_pii) were never looked at again. The global
 # PII check is only "does this user have a name?", and it runs in __removal.py
 # *before* any module import or browser launch — so re-testing a parked row is
@@ -1327,6 +1383,7 @@ def _requeue_recovered_pii():
                 "WHERE r2.kind = 1 AND r2.step = 5 "
                 "  AND TRIM(COALESCE(u.firstname, '')) <> '' "
                 "  AND TRIM(COALESCE(u.lastname, '')) <> '' "
+                "  AND CAST(COALESCE(r2.data->>'$.pii_requeues', 0) AS UNSIGNED) < %s "
                 + field_ok
                 + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
                    "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
@@ -1334,7 +1391,7 @@ def _requeue_recovered_pii():
                 + "ORDER BY r2.id LIMIT %s"
             )
             _update_by_ids(
-                conn, select_sql, (PII_REQUEUE_BATCH,),
+                conn, select_sql, (PII_REQUEUE_LIMIT, PII_REQUEUE_BATCH),
                 "UPDATE results SET step = 0, "
                 "    data = JSON_SET(COALESCE(data, '{}'), '$.pii_requeues', "
                 "        CAST(COALESCE(data->>'$.pii_requeues', 0) AS UNSIGNED) + 1) "
@@ -1506,6 +1563,7 @@ def maintenance_loop():
     orphans from the previous run exist — then both tasks every interval.
     """
     _recover_stale_claims()
+    _reap_all_chrome_at_startup()
     _refresh_stale_row_pii()
     _requeue_recovered_pii()
     while True:
@@ -1790,6 +1848,7 @@ def _watchdog_start(name, max_silence):
             if silence > max_silence:
                 log.critical("WATCHDOG: %s loop silent for %.0fs (> %.0fs) — exiting for restart",
                              name, silence, max_silence)
+                _dump_all_threads("WATCHDOG: %s loop silent for %.0fs" % (name, silence))
                 logging.shutdown()
                 os._exit(3)
 
@@ -1870,7 +1929,18 @@ def process_groups_removal():
             # double-claim anyway, but waiting keeps pacing/in-flight state
             # simple and bounds how much work is ever queued at once.
             if futures:
-                done, pending = concurrent.futures.wait(futures, timeout=row_timeout)
+                # Dump every thread's stack if nothing finishes in ten
+                # minutes, then keep waiting out the full row timeout. A
+                # genuine slow broker costs one text file; a wedged pool
+                # finally explains itself.
+                done, pending = concurrent.futures.wait(
+                    futures, timeout=min(600.0, row_timeout))
+                if not done and pending:
+                    _dump_all_threads("removal: %d row(s) in flight, none finished in 600s"
+                                      % len(pending))
+                    done2, pending = concurrent.futures.wait(
+                        pending, timeout=max(0.0, row_timeout - 600.0))
+                    done = set(done) | set(done2)
                 # The beat at the top of the loop fires every tick, so a pool
                 # whose threads are all wedged - ticking, fetching, submitting
                 # work that never starts - looked alive to the watchdog for
