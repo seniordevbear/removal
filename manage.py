@@ -228,9 +228,15 @@ try:
                     self.defaultTimeout = _was
 
         _TC.hcaptcha = _hcaptcha_with_longer_ceiling
-        _TC_APPLY["hcaptchaTimeout"] = _HC_TIMEOUT
 
-    log.info("captcha solve ceiling: %s", _TC_APPLY)
+    # NOT added to _TC_APPLY. 2026-10-13 put "hcaptchaTimeout" in there for the
+    # log line, forgetting that _tc_init_with_timeouts injects every key of
+    # _TC_APPLY into TwoCaptcha.__init__ - which does not take it. Every
+    # construction then raised "TypeError: TwoCaptcha.__init__() got an
+    # unexpected keyword argument", so every broker that solves a captcha
+    # failed before opening the page: 11 of the 22 failures on the afternoon
+    # of 14 Oct. The ceiling lives in _HC_TIMEOUT alone.
+    log.info("captcha solve ceiling: %s (hcaptcha %.0fs)", _TC_APPLY, _HC_TIMEOUT)
 except Exception as _e:
     log.warning("twocaptcha timeout patch skipped (stock 600s reCAPTCHA ceiling stays): %s", _e)
 
@@ -1470,6 +1476,12 @@ def maintenance_loop():
 # few minutes of parallelism on the rare occasions these two brokers come up.
 _DESKTOP_AUTOMATION_BROKERS = {"allantgroupcom", "digitalsegmentcom"}
 
+DESKTOP_GATE_MAX_WAIT = _get_env_float("DESKTOP_GATE_MAX_WAIT", 600.0)
+
+
+class DesktopBusy(Exception):
+    """The desktop gate could not be taken in time; the row goes back to the queue."""
+
 
 class _DesktopGate:
     def __init__(self):
@@ -1493,13 +1505,36 @@ class _DesktopGate:
                 self._cv.notify_all()
 
     @contextlib.contextmanager
-    def desktop(self):
-        """A pyautogui job that needs the whole desktop to itself."""
+    def desktop(self, max_wait=None):
+        """A pyautogui job that needs the whole desktop to itself.
+
+        Bounded wait (2026-10-14). A browser job that hangs inside a broker
+        never releases its reader slot - a stuck future cannot be killed, only
+        abandoned - so a writer waiting for readers to reach zero waited
+        forever. And while a writer is waiting, browser() makes every NEW job
+        wait too. One hung thread plus one queued desktop job therefore
+        wedged the whole pool: on the afternoon of 14 Oct throughput fell to
+        a handful of rows an hour and then to nothing, with the main loop
+        still ticking. A writer that cannot get the desktop in max_wait gives
+        up with DesktopBusy; the caller puts the row back (step 0), and the
+        readers behind it are released.
+        """
+        if max_wait is None:
+            max_wait = DESKTOP_GATE_MAX_WAIT
+        deadline = time.time() + max_wait
         with self._cv:
             self._writers_waiting += 1
-            while self._readers or self._writer_active:
-                self._cv.wait()
-            self._writers_waiting -= 1
+            try:
+                while self._readers or self._writer_active:
+                    left = deadline - time.time()
+                    if left <= 0:
+                        raise DesktopBusy(
+                            "desktop not free after %.0fs: %d browser job(s) still hold it"
+                            % (max_wait, self._readers))
+                    self._cv.wait(timeout=min(left, 5.0))
+            finally:
+                self._writers_waiting -= 1
+                self._cv.notify_all()
             self._writer_active = True
         try:
             yield
@@ -1641,6 +1676,10 @@ def _process_removal_row(row):
             # away too — the loop spun as fast as the tick, not once per
             # pacing interval.
             last_removal_processed_at.set(user_id_str, time.time())
+        except DesktopBusy as e:
+            log.warning("removal row id=%s %s: %s — requeued", row["id"], row["target_domain"], e)
+            _set_step(conn, row["id"], 0)
+            last_removal_processed_at.set(user_id_str, time.time())
         except Exception as e:
             log.exception("removal row failed id=%s", row["id"])
             crashes = _note_domain_crash(row["target_domain"])
@@ -1717,7 +1756,7 @@ def process_groups_removal():
     row_timeout = _get_env_float("REMOVAL_ROW_TIMEOUT_SECONDS", 1800.0)
     _watchdog_start("removal", _get_env_float("REMOVAL_WATCHDOG_SECONDS", 2700.0))
     while True:
-        _watchdog_beat("removal")
+        # (beat moved: idle beat below, progress beat after wait())
         conn = None
         try:
             # Exclude each e-mail family only when ITS OWN budget is spent.
@@ -1737,6 +1776,8 @@ def process_groups_removal():
                 _ccpa_exclusion_logged[0] = len(spent)
             conn = _db_connect()
             data = get_pending_removal(conn, exclude_domains=exclude)
+            if not data:
+                _watchdog_beat("removal")  # idle is fine; wedged is not
             log.info("removal tick: %d rows (concurrency=%d)", len(data), REMOVAL_CONCURRENCY)
             conn.close()
             conn = None
@@ -1771,6 +1812,13 @@ def process_groups_removal():
             # simple and bounds how much work is ever queued at once.
             if futures:
                 done, pending = concurrent.futures.wait(futures, timeout=row_timeout)
+                # The beat at the top of the loop fires every tick, so a pool
+                # whose threads are all wedged - ticking, fetching, submitting
+                # work that never starts - looked alive to the watchdog for
+                # the whole afternoon of 14 Oct. Beat here only when a row
+                # actually finished; the idle beat below covers an empty queue.
+                if done:
+                    _watchdog_beat("removal")
                 for f in done:
                     if f.exception() is not None:
                         log.error("removal worker crashed: %r", f.exception())
