@@ -1177,10 +1177,19 @@ def _ccpa_increment_or_raise(user_id, limit):
 
 
 CCPA_PER_USER_PER_DAY = 10  # legacy; kept for any importer (no longer the active cap)
-# Aggregate cap across ALL users (changed 2026-05-29). Replaces the per-user
+# Aggregate cap across ALL users (changed 2026-05-29). Replaced the per-user
 # 10/day with a global 50/day to stay well under SurgeMail's user_send_warning
-# threshold of 500/day and bound deliverability risk on the shared sending IP.
-CCPA_TOTAL_PER_DAY = 50
+# threshold of 500/day on the old mail1 relay.
+#
+# 2026-10-15: sending now goes through Google Workspace (smtp.gmail.com as
+# removals@privacyduck.com), whose own limit is 2,000 messages a day per
+# account, so the SurgeMail reasoning no longer applies. The cap is read from
+# the environment with the old value as the default - nothing changes until
+# someone sets CCPA_TOTAL_PER_DAY in .env. Raise it gradually: a new sending
+# identity earns its reputation over a couple of weeks, and the pending
+# e-mail backlog for paying customers is ~4,900 rows across 99 brokers plus
+# ~400 on courtrecords.us at 50/day.
+CCPA_TOTAL_PER_DAY = int(os.getenv("CCPA_TOTAL_PER_DAY", "50"))
 
 
 # --- signed agent authorization (2026-09-19) ------------------------------
