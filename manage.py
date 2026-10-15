@@ -862,6 +862,11 @@ def _dead_domains(conn):
     return doms
 
 
+_PRIORITY_USERS = tuple(
+    int(x) for x in os.getenv("REMOVAL_PRIORITY_USERS", "").replace(";", ",").split(",")
+    if x.strip().isdigit())
+
+
 def get_pending_removal(conn, exclude_domains=()):
     dead = _dead_domains(conn)
     # FAIRNESS FIX 2026-05-28: previous version had
@@ -906,9 +911,18 @@ def get_pending_removal(conn, exclude_domains=()):
         -- brand-new signup sees their first broker attempt in minutes.
         -- planedAt is set when dashboard_bootstrap creates kind=1 rows.
         -- COALESCE so users without planedAt sort to the end, not crash.
-        ORDER BY COALESCE(u.planedAt, '1970-01-01') DESC, ranked.user_id ASC, ranked.id ASC
+        -- 2026-10-15: REMOVAL_PRIORITY_USERS (comma-separated user ids in
+        -- .env) go ahead of everyone. The owner asked for one customer's
+        -- removals to finish by month end; bumping planedAt would do it but
+        -- also resets the "Day N" phase on that customer's own dashboard,
+        -- so priority is its own knob. Pacing still applies: one row per
+        -- user per REMOVAL_MIN_INTERVAL_SECONDS.
+        ORDER BY {priority_clause} COALESCE(u.planedAt, '1970-01-01') DESC, ranked.user_id ASC, ranked.id ASC
         LIMIT 1000
-    """.format(exclude_clause=(
+    """.format(priority_clause=(
+        "(ranked.user_id IN (" + ",".join(["%s"] * len(_PRIORITY_USERS)) + ")) DESC,"
+        if _PRIORITY_USERS else ""
+    ), exclude_clause=(
         "AND target_domain NOT IN (" + ",".join(["%s"] * len(exclude_domains)) + ")"
         if exclude_domains else ""
     ), dead_clause=(
@@ -924,7 +938,7 @@ def get_pending_removal(conn, exclude_domains=()):
                    AND pu.plan_id IS NOT NULL AND pu.plan_id <> 0
                    AND pu.plan_end IS NOT NULL AND pu.plan_end > NOW())"""
         if REMOVAL_PAID_USERS_ONLY else ""
-    )), tuple(exclude_domains) + tuple(dead))
+    )), tuple(_PRIORITY_USERS) + tuple(exclude_domains) + tuple(dead))
 
 
 def get_pending_face_removal(conn):
