@@ -27,6 +27,7 @@ privacyduck.com mailbox; nothing else changes.
 """
 import email
 import imaplib
+import threading
 import logging
 import os
 import re
@@ -161,43 +162,80 @@ def open_link_in_browser(url, screenshot_save_path, after_click=None):
             pass
 
 
+# Gmail IMAP has limits a self-hosted mailbox never had: about 15
+# simultaneous connections per account and a daily command/bandwidth budget.
+# The first version of this loop opened a fresh IMAP4_SSL login every 15 s per
+# worker for up to 120 s - eight logins per row, six workers, plus the sweep -
+# and on the morning of 15 Oct half of contactout's failures read
+# "[ALERT] Account exceeded command or bandwidth limits". One connection per
+# wait, at most two IMAP sessions at once across the process, a slower poll,
+# and Gmail's throttle answered with a pause rather than a failed removal.
+_IMAP_SLOTS = threading.BoundedSemaphore(int(os.getenv("CONFIRMATION_IMAP_MAX_SESSIONS", "2")))
+_POLL_SECONDS = float(os.getenv("CONFIRMATION_POLL_SECONDS", "20"))
+_THROTTLE_PAUSE = float(os.getenv("CONFIRMATION_THROTTLE_PAUSE", "60"))
+
+
+def _is_throttle(exc):
+    t = str(exc).lower()
+    return ("exceeded command or bandwidth" in t or "too many simultaneous" in t
+            or "temporarily unavailable" in t or "[throttled]" in t)
+
+
 def do_email_verification(site_name, screenshot_save_path, after_click=None,
                           to_address=None, wait_seconds=120):
     deadline = time.time() + wait_seconds
-    attempt = 0
-    while True:
-        attempt += 1
-        m = imap_connect()
-        try:
-            for folder, i in find_message(m, to_address=to_address, site_name=site_name):
-                typ, d = m.fetch(i, "(BODY.PEEK[])")
-                if not d or not d[0]:
-                    continue
-                msg = email.message_from_bytes(d[0][1], policy=policy.default)
-                subject = str(msg.get("Subject", ""))
-                if re.search(r"undeliverable|delivery status|spam report", subject, re.I):
-                    continue
-                link = pick_link(extract_links(message_text(msg)))
-                if not link:
-                    log.info("[%s] mail found (%s) but no confirmation link; subject=%r", site_name, folder, subject[:80])
+    m = None
+    try:
+        with _IMAP_SLOTS:
+            while True:
+                try:
+                    if m is None:
+                        m = imap_connect()
+                    for folder, i in find_message(m, to_address=to_address, site_name=site_name):
+                        typ, d = m.fetch(i, "(BODY.PEEK[])")
+                        if not d or not d[0]:
+                            continue
+                        msg = email.message_from_bytes(d[0][1], policy=policy.default)
+                        subject = str(msg.get("Subject", ""))
+                        if re.search(r"undeliverable|delivery status|spam report", subject, re.I):
+                            continue
+                        link = pick_link(extract_links(message_text(msg)))
+                        if not link:
+                            log.info("[%s] mail found (%s) but no confirmation link; subject=%r", site_name, folder, subject[:80])
+                            try:
+                                m.store(i, "+FLAGS", "\\Seen")
+                            except Exception:
+                                pass
+                            continue
+                        log.info("[%s] confirmation mail in %s: %r -> opening %s", site_name, folder, subject[:80], link[:100])
+                        try:
+                            m.store(i, "+FLAGS", "\\Seen")
+                        except Exception:
+                            pass
+                        open_link_in_browser(link, screenshot_save_path, after_click=after_click)
+                        return True
+                except (imaplib.IMAP4.error, OSError) as e:
+                    # Drop the connection; reconnect on the next pass. A throttle
+                    # answer gets a longer pause and does not count as "no mail" -
+                    # the mail may well be sitting there, we were just told to wait.
                     try:
-                        m.store(i, "+FLAGS", "\\Seen")
+                        m.logout()
                     except Exception:
                         pass
-                    continue
-                log.info("[%s] confirmation mail in %s: %r -> opening %s", site_name, folder, subject[:80], link[:100])
-                try:
-                    m.store(i, "+FLAGS", "\\Seen")
-                except Exception:
-                    pass
-                open_link_in_browser(link, screenshot_save_path, after_click=after_click)
-                return True
-        finally:
+                    m = None
+                    if _is_throttle(e):
+                        log.warning("[%s] mailbox throttled (%s); pausing %.0fs", site_name, str(e)[:80], _THROTTLE_PAUSE)
+                        deadline = max(deadline, time.time() + _THROTTLE_PAUSE + _POLL_SECONDS)
+                        sleep(_THROTTLE_PAUSE)
+                        continue
+                    log.warning("[%s] mailbox error (%s); reconnecting", site_name, str(e)[:80])
+                if time.time() >= deadline:
+                    log.info("[%s] no confirmation mail for %s within %ss", site_name, to_address or site_name, wait_seconds)
+                    return False
+                sleep(_POLL_SECONDS)
+    finally:
+        if m is not None:
             try:
                 m.logout()
             except Exception:
                 pass
-        if time.time() >= deadline:
-            log.info("[%s] no confirmation mail for %s within %ss", site_name, to_address or site_name, wait_seconds)
-            return False
-        sleep(15)

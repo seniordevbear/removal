@@ -128,10 +128,17 @@ def _broker_from_sender(sender):
 
 
 def sweep_once(conn=None):
-    from lib.email_verification import imap_connect, FOLDERS, extract_links, pick_link
+    from lib.email_verification import imap_connect, FOLDERS, extract_links, pick_link, _IMAP_SLOTS
     import requests
     stats = {"bounces": 0, "confirmations_opened": 0, "rows_failed": 0, "rows_removed": 0, "skipped": 0}
-    m = imap_connect()
+    # Share the process-wide IMAP session cap with the confirmation waits, so
+    # the sweep can never be the connection that tips Gmail into throttling.
+    _IMAP_SLOTS.acquire()
+    try:
+        m = imap_connect()
+    except Exception:
+        _IMAP_SLOTS.release()
+        raise
     try:
         for folder in FOLDERS:
             try:
@@ -189,6 +196,7 @@ def sweep_once(conn=None):
             m.logout()
         except Exception:
             pass
+        _IMAP_SLOTS.release()
     log.info("mailbox sweep: %s", stats)
     return stats
 
