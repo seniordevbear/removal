@@ -1609,9 +1609,22 @@ class _DesktopGate:
 
     @contextlib.contextmanager
     def browser(self):
-        """Any job that may open/drive a browser window."""
+        """Any job that may open/drive a browser window.
+
+        2026-10-15: a reader used to wait while a writer was merely WAITING,
+        which is the classic writer-preferring lock - and with the writer's
+        wait now bounded at 600 s, it meant one queued pyautogui row could
+        hold every new browser job for ten minutes while the two running
+        browsers finished. On 15 Oct a digitalsegment row at 11:49 was
+        followed by a dead pool and three rows that all started in the same
+        second once the wait expired. Readers now yield only to an ACTIVE
+        writer. The writer can therefore starve while browsers keep
+        arriving; the loop below avoids that by not dispatching a desktop
+        row while browser rows are in flight, and the bounded wait requeues
+        it rather than failing it if it still loses.
+        """
         with self._cv:
-            while self._writers_waiting or self._writer_active:
+            while self._writer_active:
                 self._cv.wait()
             self._readers += 1
         try:
@@ -1967,6 +1980,8 @@ def process_groups_removal():
                     _watchdog_beat("removal")  # idle is fine; wedged is not
             while slots > 0 and queue:
                 row = queue.pop(0)
+                if row["target_domain"] in _DESKTOP_AUTOMATION_BROKERS and inflight:
+                    continue        # needs the whole desktop; back when the pool is quiet
                 user_id_str = str(row["user_id"])
                 last_ts = last_removal_processed_at.get_value(user_id_str)
                 if last_ts and (time.time() - last_ts) < REMOVAL_MIN_INTERVAL_SECONDS:
