@@ -1856,148 +1856,137 @@ def _watchdog_start(name, max_silence):
 
 
 def process_groups_removal():
-    """Worker 2: removal loop.
+    """Worker 2: removal loop - a continuously refilled pool.
 
     Selection excludes CCPA email brokers once today's global email budget is
-    spent — previously those rows were claimed, raised CCPADailyLimitReached,
-    and were reset to step=0 hundreds of times per tick, clogging each user's
-    10-row fairness window so browser-automation work never got selected.
+    spent, and rows are dispatched onto a small worker pool
+    (REMOVAL_CONCURRENCY), at most one in-flight row per user. Atomic CAS
+    claiming is kept, so this also stays safe if multiple instances ever run.
 
-    Rows are then dispatched onto a small worker pool (REMOVAL_CONCURRENCY),
-    at most one in-flight row per user. Atomic CAS claiming is kept, so this
-    also stays safe if multiple instances ever run.
+    2026-10-15: the loop used to dispatch a batch of up to 24 rows and then
+    wait for ALL of them before fetching again. Rows take a median 114 s but
+    a p90 of 326 s and occasionally an hour (14 Oct log), so each batch ran
+    at the speed of its slowest row: 225 removals/hour overnight when the
+    queue was full of quick brokers, then 4/hour by mid-morning with 5,462
+    rows still pending and nothing claimed - one straggler, five idle
+    threads. Now a slot is refilled the moment a row finishes; the fetch
+    runs when there is a free slot and the queue is empty or stale.
     """
-    # Spare threads so a worker stuck in a broker (no DrissionPage/solver call
-    # is guaranteed to return) cannot hold the whole loop; see the wait below.
     pool = concurrent.futures.ThreadPoolExecutor(
         max_workers=REMOVAL_CONCURRENCY + 3, thread_name_prefix="removal-worker")
     row_timeout = _get_env_float("REMOVAL_ROW_TIMEOUT_SECONDS", 1800.0)
+    refetch_every = _get_env_float("REMOVAL_REFETCH_SECONDS", 30.0)
+    stall_after = _get_env_float("REMOVAL_STALL_DUMP_SECONDS", 600.0)
     _watchdog_start("removal", _get_env_float("REMOVAL_WATCHDOG_SECONDS", 2700.0))
-    while True:
-        # (beat moved: idle beat below, progress beat after wait())
-        conn = None
-        try:
-            # Exclude each e-mail family only when ITS OWN budget is spent.
-            doms = _email_broker_domains()
-            spent = set()
-            if ccpa_global_quota_reached():
-                spent |= doms["ccpa"]
-            if direct_send_quota_reached():
-                spent |= doms["direct"]
-            exclude = tuple(spent)
-            if len(spent) != _ccpa_exclusion_logged[0]:
-                if spent:
-                    log.info("e-mail budget spent — excluding %d e-mail broker(s) "
-                             "from selection until midnight", len(spent))
-                else:
-                    log.info("e-mail budgets reset — e-mail brokers back in selection")
-                _ccpa_exclusion_logged[0] = len(spent)
-            conn = _db_connect()
-            data = get_pending_removal(conn, exclude_domains=exclude)
-            if not data:
-                _watchdog_beat("removal")  # idle is fine; wedged is not
-            log.info("removal tick: %d rows (concurrency=%d)", len(data), REMOVAL_CONCURRENCY)
-            conn.close()
-            conn = None
 
-            # 2026-10-12: cap the batch. The selection returns up to 1,000
-            # rows and the loop used to submit one per customer (~150) onto a
-            # 6-thread pool, so a tick could never finish inside its own
-            # timeout. A tick now dispatches only what the pool can plausibly
-            # work through; the rest stay step=0 and are picked up next tick,
-            # which costs nothing because selection is fair-shared per user.
-            max_batch = max(REMOVAL_CONCURRENCY * 4,
-                            _get_env_int("REMOVAL_MAX_BATCH", 24))
-            futures = []
-            data_dispatched = []
-            for row in data:
-                if len(futures) >= max_batch:
-                    break
-                user_id_str = str(row["user_id"])
-                now_ts = time.time()
-                last_ts = last_removal_processed_at.get_value(user_id_str)
-                if last_ts and (now_ts - last_ts) < REMOVAL_MIN_INTERVAL_SECONDS:
+    inflight = {}          # future -> (row, started_at); only live rows
+    queue = []             # fetched rows not yet dispatched
+    last_fetch = 0.0
+    last_progress = time.time()
+    stall_dumped = False
+
+    def _settle(row, step, reason=None):
+        try:
+            c2 = _db_connect()
+            try:
+                _set_step(c2, row["id"], step, reason)
+            finally:
+                c2.close()
+        except Exception:
+            log.exception("could not settle row id=%s", row.get("id"))
+
+    while True:
+        try:
+            now = time.time()
+
+            # 1) finished rows free their slot
+            done = [f for f in list(inflight) if f.done()]
+            for f in done:
+                inflight.pop(f, None)
+                if f.exception() is not None:
+                    log.error("removal worker crashed: %r", f.exception())
+            if done:
+                last_progress = now
+                stall_dumped = False
+                _watchdog_beat("removal")
+
+            # 2) rows past the row timeout are abandoned. A future that can
+            #    still be cancelled never started and simply goes back to the
+            #    queue; one that refuses is wedged inside a broker and counts
+            #    as a failure. Its thread stays stuck (nothing can kill it) -
+            #    the pool's three spare threads exist for exactly that, and the
+            #    chrome reaper usually unblocks it within three hours.
+            for f, (row, t0) in list(inflight.items()):
+                if now - t0 <= row_timeout:
                     continue
+                inflight.pop(f, None)
+                never_started = f.cancel()
+                with _inflight_lock:
+                    _inflight_users.discard(str(row["user_id"]))
+                if never_started:
+                    _settle(row, 0)
+                    log.warning("removal: row id=%s %s never started in %.0fs - requeued",
+                                row["id"], row["target_domain"], row_timeout)
+                else:
+                    _settle(row, 3, "worker timeout after %ds on %s" % (row_timeout, row["target_domain"]))
+                    log.warning("removal: row id=%s %s stuck for %.0fs - abandoned",
+                                row["id"], row["target_domain"], row_timeout)
+
+            # 3) a pool with work in flight and no completion for a long time
+            #    explains itself once per stall
+            if inflight and not stall_dumped and now - last_progress > stall_after:
+                _dump_all_threads("removal: %d row(s) in flight, none finished in %.0fs"
+                                  % (len(inflight), now - last_progress))
+                stall_dumped = True
+
+            # 4) refill free slots
+            slots = REMOVAL_CONCURRENCY - len(inflight)
+            if slots > 0 and (not queue or now - last_fetch >= refetch_every):
+                doms = _email_broker_domains()
+                spent = set()
+                if ccpa_global_quota_reached():
+                    spent |= doms["ccpa"]
+                if direct_send_quota_reached():
+                    spent |= doms["direct"]
+                if len(spent) != _ccpa_exclusion_logged[0]:
+                    if spent:
+                        log.info("e-mail budget spent — excluding %d e-mail broker(s) "
+                                 "from selection until midnight", len(spent))
+                    else:
+                        log.info("e-mail budgets reset — e-mail brokers back in selection")
+                    _ccpa_exclusion_logged[0] = len(spent)
+                conn = _db_connect()
+                try:
+                    queue = get_pending_removal(conn, exclude_domains=tuple(spent))
+                finally:
+                    conn.close()
+                last_fetch = time.time()
+                log.info("removal fetch: %d rows (in flight %d, concurrency=%d)",
+                         len(queue), len(inflight), REMOVAL_CONCURRENCY)
+                if not queue and not inflight:
+                    _watchdog_beat("removal")  # idle is fine; wedged is not
+            while slots > 0 and queue:
+                row = queue.pop(0)
+                user_id_str = str(row["user_id"])
+                last_ts = last_removal_processed_at.get_value(user_id_str)
+                if last_ts and (time.time() - last_ts) < REMOVAL_MIN_INTERVAL_SECONDS:
+                    continue            # paced; comes back on the next fetch
                 with _inflight_lock:
                     if user_id_str in _inflight_users:
-                        continue
+                        continue        # one row per user at a time
                     _inflight_users.add(user_id_str)
-                futures.append(pool.submit(_process_removal_row, row))
-                data_dispatched.append(row)
+                inflight[pool.submit(_process_removal_row, row)] = (row, time.time())
+                slots -= 1
 
-            # Barrier per tick: claimed rows are step=1 so a re-fetch couldn't
-            # double-claim anyway, but waiting keeps pacing/in-flight state
-            # simple and bounds how much work is ever queued at once.
-            if futures:
-                # Dump every thread's stack if nothing finishes in ten
-                # minutes, then keep waiting out the full row timeout. A
-                # genuine slow broker costs one text file; a wedged pool
-                # finally explains itself.
-                done, pending = concurrent.futures.wait(
-                    futures, timeout=min(600.0, row_timeout))
-                if not done and pending:
-                    _dump_all_threads("removal: %d row(s) in flight, none finished in 600s"
-                                      % len(pending))
-                    done2, pending = concurrent.futures.wait(
-                        pending, timeout=max(0.0, row_timeout - 600.0))
-                    done = set(done) | set(done2)
-                # The beat at the top of the loop fires every tick, so a pool
-                # whose threads are all wedged - ticking, fetching, submitting
-                # work that never starts - looked alive to the watchdog for
-                # the whole afternoon of 14 Oct. Beat here only when a row
-                # actually finished; the idle beat below covers an empty queue.
-                if done:
-                    _watchdog_beat("removal")
-                for f in done:
-                    if f.exception() is not None:
-                        log.error("removal worker crashed: %r", f.exception())
-                if pending:
-                    # 2026-10-10: a worker that never returns used to freeze the
-                    # loop for good, so the wait is bounded.
-                    #
-                    # 2026-10-12: but "pending" is not "running". A tick submits
-                    # one row per customer — up to 150 — onto a 6-thread pool,
-                    # so most of them are still QUEUED when the timeout fires.
-                    # The first version blamed all of them equally and wrote 98
-                    # rows as failed on brokers that had never been opened
-                    # (43 of them spglobalcom). Separate the two cases: a future
-                    # that can still be cancelled never started, so it simply
-                    # goes back to the queue; only one that refuses to cancel is
-                    # genuinely stuck inside a broker and counts as a failure.
-                    rows_by_future = dict(zip(futures, data_dispatched))
-                    requeued = stuck = 0
-                    for f in pending:
-                        row = rows_by_future.get(f)
-                        if not row:
-                            continue
-                        never_started = f.cancel()
-                        with _inflight_lock:
-                            _inflight_users.discard(str(row["user_id"]))
-                        try:
-                            c2 = _db_connect()
-                            try:
-                                if never_started:
-                                    _set_step(c2, row["id"], 0)
-                                    requeued += 1
-                                else:
-                                    _set_step(c2, row["id"], 3,
-                                              "worker timeout after %ds on %s" % (row_timeout, row["target_domain"]))
-                                    stuck += 1
-                            finally:
-                                c2.close()
-                        except Exception:
-                            log.exception("could not settle pending row id=%s", row.get("id"))
-                    log.warning("removal: tick ran out of time after %.0fs — %d row(s) stuck in a broker, "
-                                "%d still queued and put back", row_timeout, stuck, requeued)
+            # 5) wait for the next completion, briefly
+            if inflight:
+                concurrent.futures.wait(list(inflight), timeout=5.0,
+                                        return_when=concurrent.futures.FIRST_COMPLETED)
+            else:
+                time.sleep(LOOP_IDLE_SLEEP_SECONDS)
         except Exception:
             log.exception("removal tick failed")
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    log.exception("conn.close failed (removal)")
-        time.sleep(LOOP_IDLE_SLEEP_SECONDS)
+            time.sleep(LOOP_IDLE_SLEEP_SECONDS)
 
 
 def process_groups_face_removal():
