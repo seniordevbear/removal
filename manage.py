@@ -105,14 +105,77 @@ from lib.automation_delay import enable_automation_delays
 # With daily files, "what happened on the 20th" is always one file.
 _LOG_DIR = os.getenv("PD_LOG_DIR", "").strip() or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "logs")
+_ORIG_STDERR = sys.stderr   # the real console; error paths below must never go through the tee
+
+# 2026-10-16: the whole process froze at 01:50 UTC - every loop silent, no
+# DB connections, one row claimed and never settled, and the watchdog did
+# not fire. Reconstructed cause: a file handler's emit() failed (on Windows
+# a rollover rename fails whenever another program holds removal.log open),
+# logging's default handleError() wrote the traceback to sys.stderr, which
+# by then was the tee below, which logged it back into the same handler,
+# which failed again... the tee's non-reentrant lock then deadlocked that
+# thread, and every other thread blocked on the handler lock at its next
+# log call - including the watchdog, whose log.critical() came before its
+# os._exit(). Four changes, each sufficient on its own:
+#   - rollover failures are swallowed and logging continues in the open file
+#   - logging.raiseExceptions = False (the documented production setting)
+#   - handleError writes to the ORIGINAL stderr, never the tee
+#   - the tee's lock is re-entrant and it never re-logs its own error path
+logging.raiseExceptions = False
+import logging.handlers as _lh
+
+
+class _SafeRotatingFileHandler(_lh.RotatingFileHandler):
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except OSError as e:
+            try:
+                _ORIG_STDERR.write("WARNING: log rollover failed (%s); continuing in the current file\n" % e)
+            except Exception:
+                pass
+            if self.stream is None:
+                try:
+                    self.stream = self._open()
+                except OSError:
+                    pass
+
+    def handleError(self, record):
+        try:
+            _ORIG_STDERR.write("WARNING: log write failed for a record\n")
+        except Exception:
+            pass
+
+
+class _SafeTimedRotatingFileHandler(_lh.TimedRotatingFileHandler):
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except OSError as e:
+            try:
+                _ORIG_STDERR.write("WARNING: daily log rollover failed (%s); continuing in the current file\n" % e)
+            except Exception:
+                pass
+            if self.stream is None:
+                try:
+                    self.stream = self._open()
+                except OSError:
+                    pass
+
+    def handleError(self, record):
+        try:
+            _ORIG_STDERR.write("WARNING: daily log write failed for a record\n")
+        except Exception:
+            pass
+
+
 _log_handlers = [logging.StreamHandler(sys.stderr)]
 try:
     os.makedirs(_LOG_DIR, exist_ok=True)
-    from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
-    _log_handlers.append(RotatingFileHandler(
+    _log_handlers.append(_SafeRotatingFileHandler(
         os.path.join(_LOG_DIR, "removal.log"),
         maxBytes=10 * 1024 * 1024, backupCount=4, encoding="utf-8"))
-    _daily = TimedRotatingFileHandler(
+    _daily = _SafeTimedRotatingFileHandler(
         os.path.join(_LOG_DIR, "removal-daily.log"),
         when="midnight", backupCount=14, encoding="utf-8", utc=False)
     _daily.suffix = "%Y-%m-%d.log"
@@ -261,11 +324,13 @@ for _h in _log_handlers[1:]:          # the RotatingFileHandler(s), if any
 
 
 class _TeeToLog:
+    _local = threading.local()
+
     def __init__(self, orig, tag):
         self._orig = orig
         self._tag = tag
         self._buf = ""
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()   # re-entrant: logging may write back here on the same thread
 
     def write(self, text):
         try:
@@ -274,15 +339,24 @@ class _TeeToLog:
             pass
         if not _file_only.handlers:
             return
+        # A write that happens INSIDE our own _file_only.info() call is
+        # logging reporting an error back to stderr. The line is already on
+        # the console; re-logging it is the recursion that froze the
+        # process on 16 Oct.
+        if getattr(self._local, "busy", False):
+            return
         with self._lock:
             self._buf += text
             while "\n" in self._buf:
                 line, self._buf = self._buf.split("\n", 1)
                 if line.strip():
+                    self._local.busy = True
                     try:
                         _file_only.info("[%s] %s", self._tag, line.rstrip())
                     except Exception:
                         pass
+                    finally:
+                        self._local.busy = False
 
     def flush(self):
         try:
@@ -1888,10 +1962,24 @@ def _watchdog_start(name, max_silence):
                 last = _watchdog_beats.get(name, 0)
             silence = time.time() - last
             if silence > max_silence:
-                log.critical("WATCHDOG: %s loop silent for %.0fs (> %.0fs) — exiting for restart",
-                             name, silence, max_silence)
-                _dump_all_threads("WATCHDOG: %s loop silent for %.0fs" % (name, silence))
-                logging.shutdown()
+                # No logging here: if the freeze IS a logging deadlock, a
+                # log.critical() blocks on the handler lock and this exit
+                # never happens (16 Oct: 45 minutes of silence, no restart).
+                # Write straight to the real console and a plain file.
+                msg = "WATCHDOG: %s loop silent for %.0fs (> %.0fs) - exiting for restart\n" % (name, silence, max_silence)
+                try:
+                    _ORIG_STDERR.write(msg); _ORIG_STDERR.flush()
+                except Exception:
+                    pass
+                try:
+                    import traceback as _tb
+                    with open(os.path.join(_LOG_DIR, "watchdog-exit.txt"), "a", encoding="utf-8") as fh:
+                        fh.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg)
+                        names = {t.ident: t.name for t in threading.enumerate()}
+                        for ident, frame in sys._current_frames().items():
+                            fh.write("=== thread %s\n%s\n" % (names.get(ident, ident), "".join(_tb.format_stack(frame))))
+                except Exception:
+                    pass
                 os._exit(3)
 
     threading.Thread(target=_run, name="watchdog-" + name, daemon=True).start()
