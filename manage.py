@@ -1295,7 +1295,8 @@ def _refresh_stale_row_pii():
                 "  '$.email',     COALESCE(u.email, ''), "
                 "  '$.firstname', COALESCE(u.firstname, ''), "
                 "  '$.lastname',  COALESCE(u.lastname, ''), "
-                "  '$.age',       COALESCE(CAST(u.age AS CHAR), ''), "
+                "  '$.age',       COALESCE(CAST(NULLIF(u.age, 0) AS CHAR), "
+                "                  CAST(TIMESTAMPDIFF(YEAR, u.birth_date, CURDATE()) AS CHAR), ''), "
                 "  '$.birth_day',   CASE WHEN u.birth_date IS NULL "
                 "       THEN COALESCE(r.data->>'$.birth_day', '') "
                 "       ELSE DATE_FORMAT(u.birth_date, '%d') END, "
@@ -1313,12 +1314,26 @@ def _refresh_stale_row_pii():
                 "), '$.pii_requeues'), "
                 "r.step = 0 "
             )
+            # 2026-10-16: not only names. A row is rebuilt when ANY field the
+            # brokers need is empty on the snapshot but present on the profile:
+            # Matthew Haugh (955) had age and birth date on file and still
+            # parked three rows on "missing_pii:Age"; 43 rows for five
+            # customers had a city and state on file and parked on City,State.
+            # Both were hand-backfilled; this makes the hourly refresh do it.
             where = (
                 "WHERE r.kind = 1 AND r.step IN (0, 5) "
                 "  AND TRIM(COALESCE(u.firstname, '')) <> '' "
                 "  AND TRIM(COALESCE(u.lastname, '')) <> '' "
-                "  AND (COALESCE(r.data->>'$.firstname', '') = '' "
-                "       OR COALESCE(r.data->>'$.lastname', '') = '')"
+                "  AND ("
+                "       COALESCE(r.data->>'$.firstname', '') = '' "
+                "    OR COALESCE(r.data->>'$.lastname', '') = '' "
+                "    OR (COALESCE(r.data->>'$.city', '') = ''  AND TRIM(COALESCE(u.city, '')) <> '') "
+                "    OR (COALESCE(r.data->>'$.state', '') = '' AND TRIM(COALESCE(u.state, '')) <> '') "
+                "    OR (COALESCE(r.data->>'$.zip', '') = ''   AND TRIM(COALESCE(u.zip, '')) <> '') "
+                "    OR (COALESCE(r.data->>'$.address', '') = '' AND TRIM(COALESCE(u.address, '')) <> '') "
+                "    OR (COALESCE(r.data->>'$.age', '') = ''   AND (COALESCE(u.age, 0) > 0 OR u.birth_date IS NOT NULL)) "
+                "    OR (COALESCE(r.data->>'$.birth_year', '') = '' AND u.birth_date IS NOT NULL)"
+                "  )"
                 + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
                    "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
                    if REMOVAL_PAID_USERS_ONLY else "")

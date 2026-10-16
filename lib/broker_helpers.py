@@ -627,6 +627,9 @@ def select_onetrust_state(container, raw, timeout=3):
     message naming the real problem. Returns True when a click landed.
     """
     raw = (raw or "").strip()
+    # A non-US profile ("County Durham", 2 failures on 15 Oct) can never match
+    # a US dropdown; park it as missing data rather than fail and retry daily.
+    require_us_state(raw)
 
     # 2026-10-12: on newer OneTrust forms the State list stays EMPTY until a
     # Country is chosen, so a perfectly valid "IL" or "AZ" matched nothing and
