@@ -658,6 +658,23 @@ def _why(exc, limit=200):
         return "broker_raised"
 
 
+def _execute_with_lock_retry(cur, sql, params, attempts=3):
+    """A single-row write that meets a lock wait (1205) or deadlock (1213)
+    is retried rather than failed. 16 Oct 03:3x local: a bulk backfill on
+    the web side held locks for a few seconds at a time, and a worker whose
+    success write failed twice left its row claimed (step=1) until the
+    two-hour stale sweep - the row looked stuck when it was finished."""
+    for i in range(attempts):
+        try:
+            cur.execute(sql, params)
+            return
+        except mysql.connector.Error as e:
+            if getattr(e, "errno", None) in _RETRYABLE_DB_ERRNOS and i < attempts - 1:
+                time.sleep(1.0 * (i + 1))
+                continue
+            raise
+
+
 def _set_step(conn, row_id, new_step, reason=None):
     """Single source of truth for step transitions. Parameterized.
 
@@ -681,15 +698,15 @@ def _set_step(conn, row_id, new_step, reason=None):
             )
             params = (new_step, row_id)
         try:
-            cur.execute(sql, params)
+            _execute_with_lock_retry(cur, sql, params)
         except Exception:
             # Never lose a step transition because the JSON write failed
             # (old MySQL, malformed pre-existing JSON, column type change).
             log.exception("step %s id=%s: reason write failed, "
                           "falling back to plain update", new_step, row_id)
             conn.rollback()
-            cur.execute("UPDATE results SET step = %s WHERE id = %s",
-                        (new_step, row_id))
+            _execute_with_lock_retry(cur, "UPDATE results SET step = %s WHERE id = %s",
+                                     (new_step, row_id))
         conn.commit()
         # 2026-10-03: successes used to be silent, so the daily logs showed
         # only failures and no success rate could be read from them.
@@ -1303,6 +1320,54 @@ def _reap_all_chrome_at_startup():
         except Exception:
             log.exception("startup chrome sweep: error on pid %s", getattr(proc, "pid", "?"))
     log.info("startup chrome sweep: killed %d leftover chrome process(es)", killed)
+    _preclean_drissionpage_port_dirs()
+
+
+def _preclean_drissionpage_port_dirs():
+    """Move DrissionPage's per-port Chrome profile folders aside before any
+    worker launches a browser, and tell DrissionPage the folder is clean.
+
+    The first stall dump of 15 Oct (14:06 local) showed all three workers
+    inside shutil.rmtree, called from DrissionPage's PortFinder.__init__:
+    on the first auto_port() launch of a process it walks
+    %TEMP%\\DrissionPage\\autoPortData and deletes every profile folder
+    whose port is free - hundreds of them after a day of crashed browsers,
+    each a full Chrome profile, with ignore_errors so a locked file makes
+    it crawl rather than fail - and all three workers did it at once
+    because the "already checked" mark is only set after the walk. Ten
+    minutes of nothing, then the row timeout.
+
+    A rename is instant. The old tree is deleted in a background thread
+    that nothing waits on, and PortFinder.checked_paths is pre-seeded so
+    its own walk never runs.
+    """
+    import tempfile, shutil
+    from pathlib import Path
+    tmp = Path(os.getenv("PD_DP_TMP", "") or tempfile.gettempdir()) / "DrissionPage" / "autoPortData"
+    try:
+        moved = None
+        if tmp.exists() and any(tmp.iterdir()):
+            moved = tmp.with_name("autoPortData.old-%s" % time.strftime("%Y%m%d-%H%M%S"))
+            tmp.rename(moved)
+        tmp.mkdir(parents=True, exist_ok=True)
+        try:
+            from DrissionPage._functions.tools import PortFinder
+            PortFinder.checked_paths.add(str(tmp.absolute()))
+            marked = True
+        except Exception:
+            marked = False
+        log.info("drissionpage port dirs: %s; PortFinder scan %s",
+                 "moved aside for background delete" if moved else "already empty",
+                 "skipped" if marked else "NOT skipped (private API changed)")
+        olds = [d for d in tmp.parent.iterdir() if d.name.startswith("autoPortData.old-")]
+        if olds:
+            def _bg():
+                for d in olds:
+                    shutil.rmtree(d, ignore_errors=True)
+                log.info("drissionpage port dirs: %d old tree(s) deleted in the background", len(olds))
+            threading.Thread(target=_bg, name="dp-tmp-cleanup", daemon=True).start()
+    except Exception:
+        log.exception("drissionpage port-dir preclean failed; continuing")
 
 
 def _dump_all_threads(reason):
