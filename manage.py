@@ -953,6 +953,7 @@ def _dead_domains(conn):
     return doms
 
 
+_PRIORITY_MIN_INTERVAL = _get_env_float("REMOVAL_PRIORITY_MIN_INTERVAL", 60.0)
 _PRIORITY_USERS = tuple(
     int(x) for x in os.getenv("REMOVAL_PRIORITY_USERS", "").replace(";", ",").split(",")
     if x.strip().isdigit())
@@ -2166,7 +2167,17 @@ def process_groups_removal():
                     continue        # needs the whole desktop; back when the pool is quiet
                 user_id_str = str(row["user_id"])
                 last_ts = last_removal_processed_at.get_value(user_id_str)
-                if last_ts and (time.time() - last_ts) < REMOVAL_MIN_INTERVAL_SECONDS:
+                # Pacing spreads one customer's 413 rows over seven days (one
+                # row per ~24 min). A customer on REMOVAL_PRIORITY_USERS is
+                # there because the owner wants them finished fast; with the
+                # standard pacing Matthew Haugh got five rows in six hours on
+                # 16 Oct, two of them in the two-hour window before the daily
+                # e-mail budgets were spent by everyone else. Priority users
+                # pace at REMOVAL_PRIORITY_MIN_INTERVAL instead (60 s): still
+                # one row at a time, but back to back.
+                interval = (_PRIORITY_MIN_INTERVAL if row["user_id"] in _PRIORITY_USERS
+                            else REMOVAL_MIN_INTERVAL_SECONDS)
+                if last_ts and (time.time() - last_ts) < interval:
                     continue            # paced; comes back on the next fetch
                 with _inflight_lock:
                     if user_id_str in _inflight_users:
