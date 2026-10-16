@@ -58,6 +58,16 @@ def _build_data_row(email, firstname, lastname, city, zip, state, age,
     We do NOT substitute defaults here. Validation happens in
     `validate_required_pii` below."""
     name_full = "{} {}".format((firstname or "").strip(), (lastname or "").strip()).strip()
+    # 2026-10-16: a JSON null in the row snapshot comes out of JSON_UNQUOTE as
+    # the four-letter string "null", not as SQL NULL - 865 pending rows held
+    # one for age - and a script would have typed it into a form. Treat the
+    # literal as empty for every field.
+    _nul = ("null", "None", "NULL")
+    (email, firstname, lastname, city, zip, state, age, address, phone,
+     birth_day, birth_month, birth_year, area_code, street, county) = [
+        "" if (isinstance(v, str) and v.strip() in _nul) else v
+        for v in (email, firstname, lastname, city, zip, state, age, address, phone,
+                  birth_day, birth_month, birth_year, area_code, street, county)]
     return {
         "Verification Email": "webremovals@privacypros.com",
         "User Email": email or "",
