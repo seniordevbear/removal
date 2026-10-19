@@ -2163,8 +2163,13 @@ def process_groups_removal():
 
             # 3) a pool with work in flight and no completion for a long time
             #    explains itself once per stall
-            if inflight and not stall_dumped and now - last_progress > stall_after:
-                _dump_all_threads("removal: %d row(s) in flight, none finished in %.0fs"
+            # Only dump when every slot is busy. One slow broker with four
+            # idle workers is not a stall, and treating it as one produced 21
+            # dumps in three days (17-19 Oct) that all read "1 row in flight"
+            # with the other workers parked in thread.py:_worker.
+            if (len(inflight) >= REMOVAL_CONCURRENCY and not stall_dumped
+                    and now - last_progress > stall_after):
+                _dump_all_threads("removal: all %d slots busy, none finished in %.0fs"
                                   % (len(inflight), now - last_progress))
                 stall_dumped = True
 
@@ -2194,10 +2199,22 @@ def process_groups_removal():
                          len(queue), len(inflight), REMOVAL_CONCURRENCY)
                 if not queue and not inflight:
                     _watchdog_beat("removal")  # idle is fine; wedged is not
-            while slots > 0 and queue:
-                row = queue.pop(0)
+            # A row skipped here is NOT consumed: it goes back in the queue.
+            # 2026-10-19: this used to queue.pop(0) every row it looked at, so
+            # a pass that paced out all of them emptied the queue, "not queue"
+            # was true on the next iteration, and the loop re-ran the
+            # selection ~6 s later for the same 52 rows. Three days of logs:
+            # 15,189 fetches that dispatched nothing against 472 that filled
+            # four slots. Keeping them means the next fetch waits the full
+            # REMOVAL_REFETCH_SECONDS, as intended.
+            kept = []
+            for idx, row in enumerate(queue):
+                if slots <= 0:
+                    kept.extend(queue[idx:])
+                    break
                 if row["target_domain"] in _DESKTOP_AUTOMATION_BROKERS and inflight:
-                    continue        # needs the whole desktop; back when the pool is quiet
+                    kept.append(row)    # needs the whole desktop; wait for a quiet pool
+                    continue
                 user_id_str = str(row["user_id"])
                 last_ts = last_removal_processed_at.get_value(user_id_str)
                 # Pacing spreads one customer's 413 rows over seven days (one
@@ -2211,13 +2228,16 @@ def process_groups_removal():
                 interval = (_PRIORITY_MIN_INTERVAL if row["user_id"] in _PRIORITY_USERS
                             else REMOVAL_MIN_INTERVAL_SECONDS)
                 if last_ts and (time.time() - last_ts) < interval:
-                    continue            # paced; comes back on the next fetch
+                    kept.append(row)    # paced; try again on the next pass
+                    continue
                 with _inflight_lock:
                     if user_id_str in _inflight_users:
-                        continue        # one row per user at a time
+                        kept.append(row)   # one row per user at a time
+                        continue
                     _inflight_users.add(user_id_str)
                 inflight[pool.submit(_process_removal_row, row)] = (row, time.time())
                 slots -= 1
+            queue = kept
 
             # 5) wait for the next completion, briefly
             if inflight:
