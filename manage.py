@@ -959,6 +959,45 @@ _PRIORITY_USERS = tuple(
     if x.strip().isdigit())
 
 
+def _covered_by_a_plan(user_col, users_alias=None):
+    """SQL predicate: this user's removals are paid for.
+
+    2026-10-19: the gate was "this user has an active plan of their own",
+    which no family member ever has. The family flow
+    (controllers/dashboard/family/invite.php) charges the organiser $99 per
+    member through Stripe, verifies the payment, then creates the member as
+    a users row with plan_id and plan_end NULL and seeds their removal rows
+    with planable=1. Those rows were then never selected: in the seven days
+    to 19 Oct the pipeline completed 5,212 removals for users with a plan
+    and 0 for users without one, while 165 paid-for rows across 18 family
+    members sat at step 0. The organiser paid and nothing ran.
+
+    Covered now means: an active plan of their own, OR a family row naming
+    them as an invitee of someone whose plan is active.
+
+    `users_alias` is the users table if the caller already joined it -
+    reading its columns directly beats a correlated EXISTS (6.3 s against
+    17.8 s on the hourly refresh, measured). The family half is IN rather
+    than EXISTS for the same reason: the table is 24 rows and MySQL
+    materialises the subquery once instead of per candidate row.
+    """
+    if users_alias:
+        own = ("({a}.plan_id IS NOT NULL AND {a}.plan_id <> 0 "
+               "AND {a}.plan_end IS NOT NULL AND {a}.plan_end > NOW())").format(a=users_alias)
+    else:
+        own = ("EXISTS (SELECT 1 FROM users pu WHERE pu.id = {u} "
+               "        AND pu.plan_id IS NOT NULL AND pu.plan_id <> 0 "
+               "        AND pu.plan_end IS NOT NULL AND pu.plan_end > NOW())").format(u=user_col)
+    family = (
+        "{u} IN (SELECT fm.invite_id FROM family fm "
+        "        JOIN users fo ON fo.id = fm.core_id "
+        "        WHERE fm.core_id <> fm.invite_id "
+        "          AND fo.plan_id IS NOT NULL AND fo.plan_id <> 0 "
+        "          AND fo.plan_end IS NOT NULL AND fo.plan_end > NOW())"
+    ).format(u=user_col)
+    return "(" + own + " OR " + family + ")"
+
+
 def get_pending_removal(conn, exclude_domains=()):
     dead = _dead_domains(conn)
     # FAIRNESS FIX 2026-05-28: previous version had
@@ -1026,9 +1065,7 @@ def get_pending_removal(conn, exclude_domains=()):
         # Must live INSIDE the ranked subquery: filtering after ROW_NUMBER()
         # would let unpaid rows consume the rn<=10 fairness slots. Mirrors
         # pd_user_has_valid_plan() on the PHP side (plan_id set + unexpired).
-        """AND EXISTS (SELECT 1 FROM users pu WHERE pu.id = results.user_id
-                   AND pu.plan_id IS NOT NULL AND pu.plan_id <> 0
-                   AND pu.plan_end IS NOT NULL AND pu.plan_end > NOW())"""
+        "AND " + _covered_by_a_plan("results.user_id")
         if REMOVAL_PAID_USERS_ONLY else ""
     )), tuple(_PRIORITY_USERS) + tuple(exclude_domains) + tuple(dead))
 
@@ -1474,8 +1511,7 @@ def _refresh_stale_row_pii():
                 "    OR (COALESCE(r.data->>'$.age', '') = ''   AND (COALESCE(u.age, 0) > 0 OR u.birth_date IS NOT NULL)) "
                 "    OR (COALESCE(r.data->>'$.birth_year', '') = '' AND u.birth_date IS NOT NULL)"
                 "  )"
-                + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
-                   "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
+                + ("  AND " + _covered_by_a_plan("u.id", users_alias="u") + " "
                    if REMOVAL_PAID_USERS_ONLY else "")
             )
             _update_by_ids(
@@ -1554,8 +1590,7 @@ def _requeue_recovered_pii():
                 "  AND TRIM(COALESCE(u.lastname, '')) <> '' "
                 "  AND CAST(COALESCE(r2.data->>'$.pii_requeues', 0) AS UNSIGNED) < %s "
                 + field_ok
-                + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
-                   "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
+                + ("  AND " + _covered_by_a_plan("u.id", users_alias="u") + " "
                    if REMOVAL_PAID_USERS_ONLY else "")
                 + "ORDER BY r2.id LIMIT %s"
             )
@@ -1601,8 +1636,7 @@ def _requeue_fixed_domains():
                 "  JOIN users u ON u.id = r2.user_id "
                 "WHERE r2.kind = 1 AND r2.step = 3 "
                 "  AND COALESCE(r2.data->>'$.fixed_retry', 0) = 0 "
-                + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
-                   "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
+                + ("  AND " + _covered_by_a_plan("u.id", users_alias="u") + " "
                    if REMOVAL_PAID_USERS_ONLY else "")
                 + "  AND EXISTS (SELECT 1 FROM results s "
                 "              WHERE s.target_domain = r2.target_domain "
@@ -1658,8 +1692,7 @@ def _probe_dead_domains():
                 "      SELECT DISTINCT p.target_domain FROM results p "
                 "      WHERE p.kind = 1 AND p.step = 0 "
                 "        AND p.data->>'$.probe_at' = CAST(CURDATE() AS CHAR)) "
-                + ("  AND u.plan_id IS NOT NULL AND u.plan_id <> 0 "
-                   "  AND u.plan_end IS NOT NULL AND u.plan_end > NOW() "
+                + ("  AND " + _covered_by_a_plan("u.id", users_alias="u") + " "
                    if REMOVAL_PAID_USERS_ONLY else "")
                 + "  AND NOT EXISTS (SELECT 1 FROM results s "
                 "      WHERE s.target_domain = r2.target_domain "
