@@ -649,9 +649,25 @@ def _why(exc, limit=200):
     the part that identifies the fault, so they travel with the row.
     """
     try:
-        first = str(exc).strip().splitlines()
-        first = first[0].strip() if first else ""
         name = type(exc).__name__
+        raw = str(exc)
+        lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+        first = lines[0] if lines else ""
+        # DrissionPage spreads the useful part over several lines:
+        #     No element found.
+        #     Method: ele()
+        #     Arguments: {'locator': 'tag:input@@id=input-59', 'index': 1, ...}
+        #     Version: 4.1.0.18
+        # so the first line alone says only "No element found." - which is
+        # what 2,045 failures across 47 brokers recorded between 17 and 19
+        # Oct, every one of them undiagnosable without the VPS log. The
+        # locator is the whole answer, so it travels with the row.
+        loc = re.search(r"'locator':\s*'([^']+)'", raw)
+        if loc:
+            first = ("%s %s" % (first, loc.group(1))).strip()
+        elif len(lines) > 1 and first.endswith("."):
+            # other multi-line errors: keep the second line too
+            first = "%s %s" % (first, lines[1])
         text = "%s: %s" % (name, first) if first else name
         return ("broker_raised: " + text)[:limit]
     except Exception:
