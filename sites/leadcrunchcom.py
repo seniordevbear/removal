@@ -2,9 +2,11 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 from time import sleep
 import json
 import random
+import logging
 import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
-from lib.broker_helpers import unique_shot_path
+from lib.broker_helpers import (unique_shot_path, fill_field, click_label_text,
+                                submission_verdict, missing_pii, log_step)
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -47,38 +49,65 @@ def make_standard_num(num) :
 
     return ret
 
-def fill_input_data(page, dataRow) : 
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-       
-    fName_input = page.ele("tag:input@@name=first_name")
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
+def fill_input_data(page, dataRow):
+    """Fill the GetRev privacy-request form.
 
-    lName_input = page.ele("tag:input@@name=last_name")
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
+    Rebuilt from the 2026-10-19 capture. The form was rewritten as a React
+    app and every selector the script used had gone: the name fields are
+    camelCase (firstName / lastName, not first_name), country and state are
+    text inputs rather than selects, the e-mail field is split into
+    workEmail / otherEmail, the address fields are textareas, the consent
+    label text changed, and Submit is a <button>Submit Request</button>
+    rather than <input type=submit value=Submit>. 78 "No element found."
+    failures between 17 and 19 Oct.
 
-    country_select = page.ele("tag:select@@name=country")
-    country_select.select.by_text("United States")
+    privacyRequestHoneypot is a trap field - it must be left empty.
+    """
+    fName = dataRow["Name"].split()[0]
+    lName = dataRow["Name"].split()[-1]
+    broker = "leadcrunchcom"
+    state_raw = (dataRow.get("State") or "").strip()
+    if not state_raw:
+        raise missing_pii("State")
 
-    sleep(1)
+    fill_field(page, "css:input[name='firstName']", fName, broker=broker)
+    fill_field(page, "css:input[name='lastName']", lName, broker=broker)
+    fill_field(page, "css:input[name='country']", "United States", broker=broker)
+    fill_field(page, "css:input[name='state']", state_raw, broker=broker)
+    fill_field(page, "css:input[name='otherEmail']",
+               generate_email(dataRow["Name"]), broker=broker)
 
-    state_select = page.ele("tag:select@@name=State")
-    __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
+    phone = generate_phone_number()
+    for sel in ("css:input[name='phone']",):
+        try:
+            fill_field(page, sel, phone, required=False, broker=broker)
+        except Exception:
+            pass
 
-    delete_checkbox = page.ele("tag:label@@text():Deletion/erasure request")
-    delete_checkbox.click()
+    addr = ", ".join(x for x in (str(dataRow.get("Address") or "").strip(),
+                                 str(dataRow.get("City") or "").strip(),
+                                 state_raw,
+                                 str(dataRow.get("Zipcode") or "").strip()) if x)
+    if addr:
+        try:
+            fill_field(page, "css:textarea[name='otherAddress']", addr,
+                       required=False, broker=broker)
+        except Exception:
+            pass
 
-    confirm_checkbox = page.ele("tag:label@@text():I certify that the information I am submitting is true and correct.")
-    confirm_checkbox.click()
+    # The request-type and consent boxes are React-controlled and carry no
+    # name or value, so the label text is the only handle.
+    for text in ("Deletion", "I certify that the information provided is accurate"):
+        try:
+            click_label_text(page, text, timeout=6)
+        except Exception as e:
+            log_step(broker, "could not tick %r: %s" % (text[:40], e), logging.WARNING)
 
-    submit_button = page.ele("tag:input@@type=submit@@value=Submit")
-    submit_button.click()
+    btn = page.ele("xpath://button[contains(normalize-space(.), 'Submit Request')]", timeout=8)
+    if not btn:
+        raise RuntimeError("leadcrunchcom: no 'Submit Request' button on the form")
+    btn.click()
+
 
 def leadcrunchcom(dataRow, website_name, in_user_email, run_mode) : 
     page = None

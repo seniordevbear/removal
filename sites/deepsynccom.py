@@ -57,6 +57,10 @@ def fill_input_data(page, dataRow) :
     fName = dataRow["Name"].split()[0] # split string based on space to get first name
     lName = dataRow["Name"].split()[-1]# split string based on space to get last name
 
+    # 2026-10-19 capture: the form now repeats the address block six times
+    # (who_address_ctx1..ctx6) and names e-mail/phone as arrays with _ctx
+    # ids, so the old id=who_address / name=email selectors matched nothing.
+    # Context 1 is the first and only one that has to be filled.
     first_name = page.ele("tag:input@@id=first_name")
     first_name.clear()
     first_name.click()
@@ -67,33 +71,41 @@ def fill_input_data(page, dataRow) :
     last_name.click()
     _human_type2(last_name, lName)
 
-    email_input = page.ele("tag:input@@name=email")
+    email_input = page.ele("tag:input@@id=email_ctx1")
     email_input.clear()
     email_input.click()
     _human_type2(email_input, generate_email(dataRow["Name"]))
 
-    phone_input = page.ele("tag:input@@name=phone")
+    phone_input = page.ele("tag:input@@id=phone_ctx1")
     phone_input.clear()
     phone_input.click()
     _human_type2(phone_input, generate_phone_number())
 
-    street_input = page.ele("tag:input@@id=who_address")
+    street_input = page.ele("tag:input@@id=who_address_ctx1")
     street_input.clear()
     street_input.click()
     _human_type2(street_input, dataRow["Address"])
 
-    city_input = page.ele("tag:input@@id=who_city")
+    city_input = page.ele("tag:input@@id=who_city_ctx1")
     city_input.clear()
     city_input.click()
     _human_type2(city_input, dataRow["City"])
 
-    state_select = page.ele("tag:select@@id=who_state")
+    state_select = page.ele("tag:select@@id=who_state_ctx1")
     __import__("lib.broker_helpers", fromlist=["select_state"]).select_state(state_select, dataRow["State"])
 
-    zip_input = page.ele("tag:input@@id=who_zip")
+    zip_input = page.ele("tag:input@@id=who_zip_ctx1")
     zip_input.clear()
     zip_input.click()
     _human_type2(zip_input, str(dataRow["Zipcode"]))
+
+    # "Who is making this request" - the form will not submit without it.
+    try:
+        myself = page.ele("css:input[name='request_type'][value='opt_out']", timeout=4)
+        if myself and not myself.states.is_checked:
+            myself.click()
+    except Exception as e:
+        print("request_type radio not set:", e)
 
     checkbox_element = page.ele("tag:input@@id=request_type_5")
     checkbox_element.set.attr("checked", True)
