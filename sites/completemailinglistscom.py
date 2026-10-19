@@ -3,10 +3,11 @@ from time import sleep
 import json
 import random
 import os, datetime, pyautogui, requests
+import logging
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
 from lib.broker_helpers import (unique_shot_path, fill_field, find_input,
-                                select_state, submission_verdict, missing_pii)
+                                submission_verdict, missing_pii, log_step)
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -43,96 +44,76 @@ def _human_type2(element , text: str) -> None:
 
         sleep(random.uniform(0.05, 0.1))
 
-def _hs_form(page, timeout=20):
-    """The HubSpot embed renders inside an iframe; return something to query.
+def _hs_form(page, timeout=30):
+    """Return the HubSpot form element on /consumer-privacy-request.
 
-    2026-10-19: /do-not-sell-my-information now 404s and the opt-out moved to
-    /consumer-privacy-request, which embeds HubSpot form
-    f997b925-9a37-4196-8d46-529376ceda52 (portal 3272390) instead of the old
-    Drupal webform. Every edit-submitted-* id the script used is gone, which
-    is where 112 "No element found." failures came from between 17 and 19 Oct.
-    Same iframe pattern giantpartnerscom already uses.
+    2026-10-19: /do-not-sell-my-information 404s; the opt-out moved to
+    /consumer-privacy-request and is HubSpot form f997b925 (portal 3272390),
+    so every edit-submitted-* id the script used was dead - 112 "No element
+    found." failures between 17 and 19 Oct. Captured 19 Oct: the form
+    renders INLINE (class hs-form-private, id hsForm_<formId>_<n>), not in
+    an iframe; the only iframes on the page are reCAPTCHA's.
     """
     from time import sleep
     for _ in range(int(timeout / 2)):
-        for sel in ("tag:iframe@@id=hs-form-iframe-0",
-                    "css:iframe.hs-form-iframe",
-                    "css:iframe[id^='hs-form-iframe']"):
+        for sel in ("css:form[id^='hsForm_']", "css:form.hs-form-private", "css:form.hs-form"):
             try:
-                fr = page.ele(sel, timeout=2)
+                f = page.ele(sel, timeout=2)
             except Exception:
-                fr = None
-            if fr:
-                return fr
-        try:
-            if page.ele("css:form.hs-form", timeout=1):
-                return page          # some embeds render inline
-        except Exception:
-            pass
+                f = None
+            if f:
+                return f
         sleep(2)
     raise RuntimeError("completemailinglistscom: the HubSpot form never rendered "
                        "(embed changed or blocked); needs a capture")
 
 
 def fill_input_data(page, dataRow):
+    """Fill the HubSpot form. Field names are from the 19 Oct capture, not
+    from HubSpot's conventions - 'state' is a free-text input rather than a
+    select, the zip field is named '0-2/zip', and date_of_birth is required.
+    Every visible field on this form carries required."""
     fName = dataRow["Name"].split()[0]
     lName = dataRow["Name"].split()[-1]
-    state_raw = (dataRow.get("State") or "").strip()
-    if not state_raw:
-        raise missing_pii("State")
-
-    form = _hs_form(page)
     broker = "completemailinglistscom"
 
-    # HubSpot names its standard contact properties the same way on every
-    # portal, so these are the platform's names rather than a guess about
-    # this site; fill_field verifies the value actually landed, so a wrong
-    # one fails loudly instead of submitting a half-empty form.
-    for names, value, required in (
-        (("firstname", "first_name"), fName, True),
-        (("lastname", "last_name"), lName, True),
-        (("email",), generate_email(dataRow["Name"]), True),
-        (("phone", "mobilephone"), generate_phone_number(), False),
-        (("address", "street_address"), str(dataRow.get("Address") or ""), False),
-        (("city",), str(dataRow.get("City") or ""), False),
-        (("zip", "zipcode", "zip_code"), str(dataRow.get("Zipcode") or ""), False),
+    missing = [k for k in ("Address", "City", "State", "Zipcode")
+               if not str(dataRow.get(k) or "").strip()]
+    dob = "/".join(x for x in (str(dataRow.get("Birth Month") or "").strip(),
+                               str(dataRow.get("Birth Day") or "").strip(),
+                               str(dataRow.get("Birth Year") or "").strip()) if x)
+    if not str(dataRow.get("Birth Year") or "").strip():
+        missing.append("Birth Year")
+    if missing:
+        raise missing_pii(*missing)
+
+    form = _hs_form(page)
+    for name, value in (
+        ("firstname", fName),
+        ("lastname", lName),
+        ("phone", generate_phone_number()),
+        ("email", generate_email(dataRow["Name"])),
+        ("address", str(dataRow["Address"])),
+        ("city", str(dataRow["City"])),
+        ("state", str(dataRow["State"])),
+        ("0-2/zip", str(dataRow["Zipcode"])),
+        ("date_of_birth", dob),
     ):
-        if not value:
-            continue
-        sel = None
-        for n in names:
-            cand = "css:input[name='%s']" % n
-            try:
-                if form.ele(cand, timeout=2):
-                    sel = cand
-                    break
-            except Exception:
-                continue
-        if sel is None:
-            if required:
-                raise RuntimeError("completemailinglistscom: no field named %s on the "
-                                   "HubSpot form" % " / ".join(names))
-            continue
-        fill_field(form, sel, value, broker=broker)
+        fill_field(form, "css:input[name='%s']" % name, value, broker=broker)
 
-    # State was hardcoded to "CA" for every customer, so everyone was filed
-    # as a Californian whatever their profile said.
-    try:
-        sel = find_input(form, "css:select[name='state']", "css:select[name='state_dropdown']",
-                         "css:select[name='hs_state']", timeout=4.0)
-        select_state(sel, state_raw)
-    except ValueError:
-        pass    # no state control on this form
-
-    for needle in ("do not sell", "delete my personal", "opt out"):
+    # The request-type checkboxes carry their meaning in value=, and the
+    # requestor-type ones share the same field name.
+    for value in ("Delete My Information",
+                  "Opt Out of Sale and Sharing or Use for Targeted Advertising",
+                  "INDIVIDUAL requestor *"):
         try:
-            box = form.ele("xpath://label[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
-                           " 'abcdefghijklmnopqrstuvwxyz'), %r)]//input[@type='checkbox' or @type='radio']"
-                           % needle, timeout=2)
-            if box:
+            box = form.ele("css:input[type=checkbox][value=\"%s\"]" % value, timeout=3)
+            if box and not box.states.is_checked:
                 box.click()
-        except Exception:
-            pass
+            elif not box:
+                log_step(broker, "checkbox %r not on the form" % value[:40], logging.WARNING)
+        except Exception as e:
+            log_step(broker, "checkbox %r failed: %s" % (value[:40], e), logging.WARNING)
     return form
 
 
@@ -170,9 +151,11 @@ def completemailinglistscom(dataRow, website_name, in_user_email, run_mode) :
         solver = TwoCaptcha(apiKey)
         print("Captcha is solving...")
         try :
-            site_key = "6Lcf0GgUAAAAAEwCWGvobHHllJLJbZtSRnLy66vR"
+            # 19 Oct capture: reCAPTCHA Enterprise on the HubSpot page. The old
+            # key below belonged to the retired Drupal form.
+            site_key = "6Ld_ad8ZAAAAAAqr0ePo1dUfAi0m4KPkCMQYwPPm"
             site_url = page.url
-            result = solver.recaptcha(site_key, site_url)
+            result = solver.recaptcha(site_key, site_url, enterprise=1)
             print("Captcha is solved.")
             print(result["code"])
             Code = result["code"]
@@ -182,13 +165,17 @@ def completemailinglistscom(dataRow, website_name, in_user_email, run_mode) :
             # was not solved".
             raise RuntimeError("completemailinglistscom: captcha not solved: %s" % e)
 
-        textarea_token = page.ele("tag:textarea@@id=g-recaptcha-response", timeout=6)
-        if textarea_token:
-            textarea_token.set.innerHTML(Code)
+        # The Enterprise widget hides its textarea, so set every copy of it
+        # directly - the same thing hirerightcom does for its Enterprise form.
+        page.run_js(
+            "var t=arguments[0];"
+            "document.querySelectorAll(\"textarea[name='g-recaptcha-response']\")"
+            ".forEach(function(e){e.style.display='block';e.value=t;});", Code)
 
         sleep(random.uniform(0.5, 1))
-        submit_button = find_input(form, "css:input[type=submit]", "css:button[type=submit]",
-                                   "tag:button@@name=op", timeout=6.0)
+        submit_button = find_input(form, "css:input[type=submit].hs-button",
+                                   "css:input[type=submit]", "css:button[type=submit]",
+                                   timeout=6.0)
         submit_button.click()
 
         # The click alone was previously taken as proof of removal.
