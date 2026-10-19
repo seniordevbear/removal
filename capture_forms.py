@@ -229,6 +229,36 @@ ROUND8 = {
     "scan-smartbackgroundcheckscom": "https://www.smartbackgroundchecks.com/people/john-smith",
 }
 
+# Round 9 (2026-10-19). The ElementNotFoundError cohort: between 17 and 19
+# Oct these 18 brokers produced 2,045 of the pipeline's failures, every one
+# recorded as "No element found." with no clue which selector died. Two are
+# already known to have moved - completemailinglists 404s on the path the
+# script uses and its form is now a HubSpot embed at
+# /consumer-privacy-request, and lexisnexis only links to /optrequest from
+# the page the script opens - and the rest need their live DOM before
+# anything can be written honestly.
+ROUND9 = {
+    "clustrmapscom": "https://clustrmaps.com/bl/opt-out",
+    "clearbitcom": "https://preferences.clearbit.com",
+    "completemailinglistscom": "https://www.completemailinglists.com/consumer-privacy-request",
+    "peoplesearchnowcom": "https://www.peoplesearchnow.com/opt-out",
+    "optoutprescreencom": "https://www.optoutprescreen.com/",
+    "contacts411com": "https://contacts411.com/opt-out",
+    "conversantmediacom": "https://legal.epsilon.com/dsr/",
+    "corelogiccom": "https://www.corelogic.com/employee-applicant-privacy-form/",
+    "costarcom": "https://privacyportal.onetrust.com/webform/69fc85af-b1e4-4eae-966b-cf91a3cca94c/5f1a45b9-bb79-49dc-ad4d-064548192246",
+    "optoutlexisnexiscom": "https://optout.lexisnexis.com/optrequest",
+    "leadcrunchcom": "https://getrev.ai/privacy-request/",
+    "advancedbackgroundcheckscom": "https://www.advancedbackgroundchecks.com/opt-out",
+    "idstrongcom": "https://www.idstrong.com/remove-my-information/",
+    "nuwbercom": "https://nuwber.com/removal/link",
+    "deepsynccom": "https://privacy.deepsync.com/",
+    "datatrustcom": "https://thedatatrust.com/do-not-sell-my-personal-information/",
+    "datastreamgroupcom": "https://www.godaddy.com/legal/agreements/do-not-share",
+    "cowencom": "https://forian.com/privacy-do-not-sell-share/",
+}
+
+
 
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
@@ -292,7 +322,7 @@ def main():
 
     ok = fail = 0
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8}.get(arg, TARGETS)
+    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8, "round9": ROUND9}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)
