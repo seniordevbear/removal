@@ -2,12 +2,14 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 from time import sleep
 import json
 import random
+import logging
 import os, datetime, pyautogui, requests, sys
 from lib.common import generate_email, generate_phone_number
 from twocaptcha import TwoCaptcha
 from lib.email_verification import do_email_verification
 from cloudsolver.extension import proxies
-from lib.broker_helpers import select_onetrust_state
+from lib.broker_helpers import (unique_shot_path, fill_field, submission_verdict,
+                                missing_pii, log_step, state_abbrev)
 from lib.broker_helpers import unique_shot_path
 
 api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
@@ -54,189 +56,141 @@ def make_standard_num(num) :
 
     return ret
 
-def fill_input_data(page, dataRow) : 
-    
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+# 2026-10-20: rebuilt from the round-12 capture. The OneTrust webform the
+# script used returns 135 bytes and is dead; CoStar replaced it with its own
+# portal at privacy.costar.com/DSAR-submission/, which is e-mail-verification
+# gated: you submit an address, CoStar e-mails a link, and only the page
+# behind that link carries the request form. So the flow mirrors
+# contactoutcom - fill the gate, then let do_email_verification open the link
+# and fill the real form in the tab it hands back.
+#
+# From the capture's own getRequestTypes(): country is a 3-letter code
+# ("USA"), state is the 2-letter code, and the opt-out radio only exists for
+# CA CO CT VA UT TX MT OR DE IA IN TN - every other state gets Delete, which
+# is the stronger request anyway. The gate has a honeypot named
+# additionalValues labelled "Leave this field blank": never touched.
+FORM_URL = "https://privacy.costar.com/DSAR-submission/"
+OPT_OUT_STATES = {"CA", "CO", "CT", "VA", "UT", "TX", "MT", "OR", "DE", "IA", "IN", "TN"}
+
+
+def _fill_request_form(tab, dataRow, email_str, shot_path):
+    """Fill the form that appears behind the verification link."""
+    broker = "costarcom"
+    sleep(4)
+    st = state_abbrev(dataRow["State"])          # raises missing_pii if not a US state
+
+    for sid, value in (("brand", "CoStar"), ("country", "USA")):
+        el = tab.ele("css:select#" + sid, timeout=15)
+        if not el:
+            raise RuntimeError("costarcom: select #%s not on the form" % sid)
+        try:
+            el.select.by_value(value)
+        except Exception:
+            el.select.by_text("CoStar" if sid == "brand" else "United States")
+        sleep(0.8)
+
+    el = tab.ele("css:select#state", timeout=10)
+    if el:
+        try:
+            el.select.by_value(st)
+        except Exception:
+            el.select.by_text(dataRow["State"])
+        sleep(1.2)
+
+    el = tab.ele("css:select#relationship", timeout=10)
+    if el:
+        el.select.by_text("Customer")
+        sleep(0.8)
+
+    # Request-type radios are rendered by JS once country and state are set.
+    wanted = "opt-out" if st in OPT_OUT_STATES else "delete"
+    radio = tab.ele("css:input#request-%s" % wanted, timeout=10) or tab.ele("css:input#request-delete", timeout=5)
+    if not radio:
+        raise RuntimeError("costarcom: no request-type radio appeared for state %s" % st)
+    radio.click()
+    log_step(broker, "request type: %s" % wanted)
+    sleep(0.5)
+
+    fName = dataRow["Name"].split()[0]
+    lName = dataRow["Name"].split()[-1]
+    fill_field(tab, "css:input#first-name", fName, broker=broker)
+    fill_field(tab, "css:input#last-name", lName, broker=broker)
+    fill_field(tab, "css:input#email", email_str, broker=broker)
+    fill_field(tab, "css:input#address", str(dataRow.get("Address") or ""), broker=broker)
+    fill_field(tab, "css:input#city", str(dataRow.get("City") or ""), broker=broker)
+    fill_field(tab, "css:input#zip-code", str(dataRow.get("Zipcode") or ""), broker=broker)
+    fill_field(tab, "css:input#phone", generate_phone_number(), broker=broker)
+    ps = tab.ele("css:select#personal-state", timeout=6)
+    if ps:
+        try:
+            ps.select.by_value(st)
+        except Exception:
+            ps.select.by_text(dataRow["State"])
+    fill_field(tab, "css:textarea#additional-details",
+               "Please delete all personal information you hold about me and stop selling "
+               "or sharing it. Submitted by PrivacyDuck as the consumer's authorized agent.",
+               broker=broker)
+
+    btn = tab.ele("xpath://button[@type='submit' or contains(normalize-space(.), 'Submit Privacy Request')]",
+                  timeout=10)
+    if not btn:
+        raise RuntimeError("costarcom: Submit Privacy Request button not found")
+    btn.click()
+    submission_verdict(tab, broker, success_phrases=(
+        "thank you", "received", "submitted", "your request"), timeout=25)
     sleep(2)
-
-    country_select = page.ele("tag:input@@id=countryDSARElement")
-    country_select.click()
-    sleep(random.uniform(0.1,0.5))
-    page.ele("tag:vt-option@@aria-label=United States").click()
-    
-    state_select = page.ele("tag:input@@id=stateDSARElement")
-    state_select.click()
-    sleep(random.uniform(0.1,0.5))
-    select_onetrust_state(page, dataRow["State"])  # full-name/code tolerant (2026-09-24)
-
-    user_select = page.ele("tag:input@@id=formField74DSARElement")
-    user_select.click()
-    sleep(random.uniform(0.1,0.5))
-    page.ele("tag:vt-option@@aria-label=Current Employee/Contractor").click()
-
-    request_type = page.ele("tag:span@@text()= Right to Delete ")
-    request_type.click()
-
-    sender_type = page.ele("tag:span@@text()= Yes ")
-    sender_type.click()
- 
-    fName_input = page.ele("tag:input@@id=firstNameDSARElement")
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
+    try:
+        tab.get_screenshot(shot_path)
+    except Exception:
+        pass
 
 
-    lName_input = page.ele("tag:input@@id=lastNameDSARElement")
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    email_str = generate_email(dataRow["Name"])
-    email_input = page.ele("tag:input@@id=emailDSARElement")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, email_str)
-    
-
-def costarcom(dataRow, website_name, in_user_email, run_mode) : 
+def costarcom(dataRow, website_name, in_user_email, run_mode):
     page = None
-    try : 
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-        
-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+    screenshot_save_path = None
+    try:
+        fName = dataRow["Name"].split()[0]
+        lName = dataRow["Name"].split()[-1]
         screenshot_save_path = unique_shot_path(screentShotDir, "CostarCom", fName, lName)
-        
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
+        for field in ("Address", "City", "State", "Zipcode"):
+            if not str(dataRow.get(field) or "").strip():
+                raise missing_pii(field)
 
-        port_arr = [
-            "10001",
-            "10002",
-            "10003",
-            "10004",
-            "10005",
-            "10006",
-            "10007",
-            "10008",
-            "10009",
-            "10010"
-        ]
-
-        random_number = random.randint(0, 9)
-
-        
-        #Launch Website
-        username = os.getenv("SMARTPROXY_USER", "")
-        password = os.getenv("SMARTPROXY_PASSWORD", "")
-        endpoint = os.getenv("SMARTPROXY_ENDPOINT", "isp.smartproxy.com")
-        port = port_arr[random_number]
-
-
-        print(endpoint + ":" + port)
-        proxy_extension = proxies(username, password, endpoint, port)
-
-        options = get_chromium_options(arguments).auto_port().add_extension("extension")
-
-        if run_mode == "headless" :
+        arguments = ["-no-first-run", "--start-maximized", "-disable-gpu", "-disable-sensors"]
+        options = get_chromium_options(arguments).auto_port()
+        if run_mode == "headless":
             options.headless()
-        
-        #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        # 2026-10-20: the old OneTrust webform id returns 135 bytes from the VPS
-        # and from the web server - it is dead. CoStar's Global Privacy
-        # Notice names a dedicated submission page instead. The form behind
-        # it has not been captured yet (403 to anything but a real browser),
-        # so the *DSARElement selectors below are unverified against it.
-        page.get("https://privacy.costar.com/DSAR-submission/")
+        page.get(FORM_URL)
+        sleep(random.uniform(3, 5))
 
-        sleep(random.uniform(1, 2))       
+        email_str = generate_email(dataRow["Name"])
+        fill_field(page, "css:input#verification-email", email_str, broker="costarcom")
+        btn = page.ele("css:button#send-link-button", timeout=10)
+        if not btn:
+            raise RuntimeError("costarcom: 'Send verification link' button not found")
+        btn.click()
+        sleep(4)
+        page.get_screenshot(screenshot_save_path)
 
-        fill_input_data(page, dataRow)
-
-        sleep(1)
-
-        page.wait.ele_displayed("tag:iframe@@title=reCAPTCHA")
-        sleep(1)
-
-        iframe_container = page.ele("tag:iframe@@title=reCAPTCHA")
-        rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
-        print(rc_anchor_container)
-        rc_anchor_container.click()
-
-        sleep(2)
-        page.wait.ele_displayed("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        sleep(1)
-        iframe_container1 = page.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        audio_button = iframe_container1.ele("tag:button@@id=recaptcha-audio-button")
-
-        print(audio_button)
-        audio_button.click()
-        audio_source = iframe_container1.ele("tag:audio@@id=audio-source").attr("src")
-        print(audio_source)
-
-        response = requests.get(audio_source)
-        with open(("__downloaded_%d.mp3" % __import__("threading").get_ident()), "wb") as file:
-            file.write(response.content)
-
-        sleep(1)
-
-        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
-        solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            result = solver.audio(("__downloaded_%d.mp3" % __import__("threading").get_ident()), lang="en")
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            print("Error: ", str(e))
-        audio_reponse_input = iframe_container1.ele("tag:input@@id=audio-response")
-        _human_type2(audio_reponse_input, Code)
-
-        verify_btn = iframe_container1.ele("tag:button@@id=recaptcha-verify-button")
-        verify_btn.click()
-
-        sleep(5)
-        
-        submit_button = page.ele("tag:button@@id=dsar-webform-submit-button")
-        submit_button.click()
-
-        try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
-        
-    
-    except Exception as e:
-        try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
+        from lib.email_verification import do_email_verification
+        ok = do_email_verification(
+            "costar", screenshot_save_path,
+            after_click=lambda tab: _fill_request_form(tab, dataRow, email_str, screenshot_save_path),
+            to_address=email_str, wait_seconds=180)
+        if not ok:
+            raise RuntimeError("costarcom: verification link sent to %s but no mail arrived" % email_str)
+    except Exception:
+        try:
+            if page is not None and screenshot_save_path:
+                page.get_screenshot(screenshot_save_path)
+        except Exception:
+            pass
         raise
-
     finally:
         if page is not None:
             try:
                 page.quit()
             except Exception:
                 pass
-
     return screenshot_save_path
-    

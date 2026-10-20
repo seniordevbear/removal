@@ -19,10 +19,16 @@ def unresolved(path):
             for tg in n.targets: bind(tg, defined)
         elif isinstance(n, (ast.AugAssign, ast.AnnAssign)): bind(n.target, defined)
     miss = set()
+    def argnames(a):
+        out = {x.arg for x in a.args} | {x.arg for x in a.kwonlyargs} | {x.arg for x in getattr(a, 'posonlyargs', [])}
+        if a.vararg: out.add(a.vararg.arg)
+        if a.kwarg: out.add(a.kwarg.arg)
+        return out
     for fn in [x for x in ast.walk(t) if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        local = {a.arg for a in fn.args.args} | {a.arg for a in fn.args.kwonlyargs}
-        if fn.args.vararg: local.add(fn.args.vararg.arg)
-        if fn.args.kwarg: local.add(fn.args.kwarg.arg)
+        local = argnames(fn.args)
+        # a lambda inside this function binds its own parameters
+        for lam in [x for x in ast.walk(fn) if isinstance(x, ast.Lambda)]:
+            local |= argnames(lam.args)
         for n in ast.walk(fn):
             if isinstance(n, ast.Assign):
                 for tg in n.targets: bind(tg, local)
