@@ -271,6 +271,18 @@ ROUND10 = {
     "costarcom": "https://privacyportal.onetrust.com/webform/69fc85af-b1e4-4eae-966b-cf91a3cca94c/5f1a45b9-bb79-49dc-ad4d-064548192246",
 }
 
+# Round 11 (2026-10-20). From the round-10 log: forian's /privacy-policy/
+# redirects to its homepage, whose footer links a dedicated consumer-requests
+# page; costar's OneTrust webform id returned 135 bytes from the VPS as well
+# as from the web server, so the id is dead and costar.com itself is behind
+# an Akamai bot wall that 403s every fetch from the server - only a real
+# browser on the VPS can read its privacy notice for the current form.
+ROUND11 = {
+    "cowencom": "https://forian.com/privacy-consumer-requests/",
+    "costarcom": "https://www.costar.com/about/privacy-notice",
+}
+
+
 
 
 
@@ -336,7 +348,7 @@ def main():
 
     ok = fail = 0
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8, "round9": ROUND9, "round10": ROUND10}.get(arg, TARGETS)
+    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8, "round9": ROUND9, "round10": ROUND10, "round11": ROUND11}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)
