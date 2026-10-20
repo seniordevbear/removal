@@ -8,7 +8,7 @@ from lib.common import generate_email, generate_phone_number
 from lib.email_verification import do_email_verification
 from cloudsolver.extension import proxies
 from lib.broker_helpers import select_onetrust_state
-from lib.broker_helpers import unique_shot_path
+from lib.broker_helpers import unique_shot_path, fill_field, submission_verdict
 
 api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
 solver = TwoCaptcha(api_key)
@@ -53,76 +53,28 @@ def make_standard (num) :
 
     return ret 
 
-def fill_input_data(page, dataRow) : 
-    
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-    
-    div_container = page.ele("#ajax-content-wrap")
-    print(div_container)
-    iframe_container = div_container.ele("tag:iframe")
-    print(iframe_container)
-    
+def fill_input_data(page, dataRow):
+    """Fill Data Trust's privacy-rights form.
 
-    request_type = iframe_container.ele("tag:span@@text()= Right to Delete ")
-    request_type.click()
+    Rebuilt from the 2026-10-19 capture plus a fetch of /your-privacy-choices/
+    on 20 Oct. The script used to open /do-not-sell-my-personal-information/
+    (now a redirect to the privacy policy) and look for a OneTrust iframe with
+    *DSARElement ids; the site runs Gravity Forms now. Form gform_5 has three
+    visible fields - input_5_2_3 (first name), input_5_2_6 (last name),
+    input_5_1 (e-mail, required) - and an invisible reCAPTCHA Enterprise
+    (sitekey 6Lc0uM4t..., token textarea g-recaptcha-response-100000).
+    """
+    fName = dataRow["Name"].split()[0]
+    lName = dataRow["Name"].split()[-1]
+    broker = "datatrustcom"
+    form = page.ele("css:form#gform_5", timeout=20)
+    if not form:
+        raise RuntimeError("datatrustcom: gform_5 not on /your-privacy-choices/ (form changed); needs a capture")
+    fill_field(form, "css:input#input_5_2_3", fName, broker=broker)
+    fill_field(form, "css:input#input_5_2_6", lName, broker=broker)
+    fill_field(form, "css:input#input_5_1", generate_email(dataRow["Name"]), broker=broker)
+    return form
 
-    fName_input = iframe_container.ele("tag:input@@id=firstNameDSARElement")
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
-
-
-    lName_input = iframe_container.ele("tag:input@@id=lastNameDSARElement")
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
-
-    address_input = iframe_container.ele("tag:input@@id=addressDSARElement")
-    address_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
-
-    city_input = iframe_container.ele("tag:input@@id=cityDSARElement")
-    city_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(city_input, dataRow["City"])
-
-    state_select = iframe_container.ele("tag:input@@id=formField19DSARElement")
-    state_select.click()
-    sleep(random.uniform(0.1,0.5))
-    # was usaStateDictionary[...] (KeyError on "TX") with an else-branch that
-    # clicked vt-option[0] — i.e. filed the request under the WRONG state
-    # rather than failing. The helper raises instead (2026-09-24).
-    select_onetrust_state(iframe_container, dataRow["State"])
-
-    zip_input = iframe_container.ele("tag:input@@id=zipDSARElement")
-    zip_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(zip_input, str(dataRow["Zipcode"]))
-
-    email_str = generate_email(dataRow["Name"])
-    email_input = iframe_container.ele("tag:input@@id=emailDSARElement")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, email_str)
-
-    
-    phone_input = iframe_container.ele("tag:input@@id=phoneNumberDSARElement")
-    phone_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, dataRow["Phone Number"])
-
-    user_type = iframe_container.ele("tag:span@@text()= Yes ")
-    user_type.click()
-
-    detail_textarea = iframe_container.ele("tag:textarea@@id=requestDetailsDSARElement")
-    detail_textarea.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(detail_textarea, "I want to remove my info.")
 
 def datatrustcom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
@@ -173,63 +125,39 @@ def datatrustcom(dataRow, website_name, in_user_email, run_mode) :
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
         # page.load_mode=None
-        page.get("https://thedatatrust.com/do-not-sell-my-personal-information/")
-
-        sleep(random.uniform(1, 2))       
-
-        fill_input_data(page, dataRow)
-
+        # 20 Oct 2026: the do-not-sell path redirects to the privacy policy;
+        # the rights form lives on /your-privacy-choices/.
+        page.get("https://thedatatrust.com/your-privacy-choices/")
+        sleep(random.uniform(2, 3))
+        form = fill_input_data(page, dataRow)
         sleep(1)
 
-        page.wait.ele_displayed("#ajax-content-wrap")
-        div_container = page.ele("#ajax-content-wrap")
-        print(div_container)
-        iframe_root_container = div_container.ele("tag:iframe")
-
-        iframe_container = iframe_root_container.ele("tag:iframe@@title=reCAPTCHA")
-        rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
-        print(rc_anchor_container)
-        rc_anchor_container.click()
-
-        sleep(2)
-        
-        iframe_container1 = iframe_root_container.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        audio_button = iframe_container1.ele("tag:button@@id=recaptcha-audio-button")
-
-        print(audio_button)
-        audio_button.click()
-        audio_source = iframe_container1.ele("tag:audio@@id=audio-source").attr("src")
-        print(audio_source)
-
-        response = requests.get(audio_source)
-        with open(("__downloaded_%d.mp3" % __import__("threading").get_ident()), "wb") as file:
-            file.write(response.content)
-
-        sleep(1)
-
+        # Invisible reCAPTCHA Enterprise (Gravity Forms add-on). Solve it off-page
+        # and drop the token into the hidden textarea the plugin reads.
         apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
         solver = TwoCaptcha(apiKey)
         print("Captcha is solving...")
-        try :
-            result = solver.audio(("__downloaded_%d.mp3" % __import__("threading").get_ident()), lang="en")
-            print("Captcha is solved.")
-            print(result["code"])
+        try:
+            result = solver.recaptcha(sitekey="6Lc0uM4tAAAAAFFEy0tF8Z0YQN1dAZwmwIzZbuwd",
+                                      url="https://thedatatrust.com/your-privacy-choices/",
+                                      enterprise=1, invisible=1)
             Code = result["code"]
         except Exception as e:
-            print("Error: ", str(e))
-        audio_reponse_input = iframe_container1.ele("tag:input@@id=audio-response")
-        _human_type2(audio_reponse_input, Code)
-
-        verify_btn = iframe_container1.ele("tag:button@@id=recaptcha-verify-button")
-        verify_btn.click()
-
-        sleep(5)
-
-
-        submit_button = iframe_root_container.ele("tag:button@@id=dsar-webform-submit-button")
-        submit_button.run_js("this.click();")
+            raise RuntimeError("datatrustcom: captcha not solved: %s" % e)
+        page.run_js(
+            "var t=arguments[0];"
+            "document.querySelectorAll(\"textarea[name='g-recaptcha-response']\")"
+            ".forEach(function(e){e.style.display='block';e.value=t;});", Code)
+        sleep(random.uniform(0.5, 1))
+        submit_button = form.ele("css:#gform_submit_button_5", timeout=6)
+        if not submit_button:
+            raise RuntimeError("datatrustcom: gform_submit_button_5 not found")
+        submit_button.click()
+        # Gravity Forms swaps the form for .gform_confirmation_message on success
+        # and shows .gfield_error / .validation_error on rejection.
+        submission_verdict(page, "datatrustcom", success_phrases=(
+            "thank you", "received", "submitted"), timeout=20)
         sleep(1)
-        
         try :
             # response = requests.get(sucessConfirmationApi, timeout=10)
             print("Success Confirmation API is sent successfully!")

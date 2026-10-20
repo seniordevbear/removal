@@ -258,6 +258,20 @@ ROUND9 = {
     "cowencom": "https://forian.com/privacy-do-not-sell-share/",
 }
 
+# Round 10 (2026-10-20). The round-9 pages that turned out to be the wrong
+# page: the scripts' URLs now redirect to a policy page, a search funnel or
+# a homepage, and the real form is elsewhere. These are the real forms,
+# found from the captures and the sites' own privacy notices.
+ROUND10 = {
+    "idstrongcom": "https://submit-irm.trustarc.com/services/validation/8bec428f-079d-421f-8b6b-3ede6c5d5930/?brandId=beaae2c1-19bc-4369-9a5c-21ce0c61625c",
+    "datastreamgroupcom": "https://privacyportal.onetrust.com/webform/9c7cf400-5967-40b4-9f91-7df7b5eff86b/e5068a23-1539-4b4a-978a-8d5320ab0de7",
+    "datatrustcom": "https://thedatatrust.com/your-privacy-choices/",
+    "cowencom": "https://forian.com/privacy-policy/",
+    "optoutlexisnexiscom": "https://optout.lexisnexis.com/optrequest",
+    "costarcom": "https://privacyportal.onetrust.com/webform/69fc85af-b1e4-4eae-966b-cf91a3cca94c/5f1a45b9-bb79-49dc-ad4d-064548192246",
+}
+
+
 
 
 def log(msg):
@@ -322,7 +336,7 @@ def main():
 
     ok = fail = 0
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8, "round9": ROUND9}.get(arg, TARGETS)
+    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8, "round9": ROUND9, "round10": ROUND10}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)
