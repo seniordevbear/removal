@@ -36,6 +36,7 @@
 #   4  not_implemented (no sites/<domain>.py file — informational, won't retry)
 #   5  skipped_missing_pii (user record was incomplete; user must fix profile)
 import os
+import re
 import sys
 import time
 import json
