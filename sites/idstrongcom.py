@@ -2,12 +2,14 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 from time import sleep
 import json
 import random
+import logging
 import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
 from lib.email_verification import do_email_verification
 from cloudsolver.extension import proxies
 from twocaptcha import TwoCaptcha
-from lib.broker_helpers import select_onetrust_state
+from lib.broker_helpers import (fill_field, submission_verdict, missing_pii, log_step,
+                                unique_shot_path, _state_full_name)
 from lib.broker_helpers import unique_shot_path
 
 now = datetime.datetime.now()
@@ -52,191 +54,121 @@ def make_standard_num(num) :
 
     return ret
 
-def fill_input_data(page, dataRow) : 
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name 
-    
-    sleep(1)
-    div_container = page.ele("tag:div@@class=ot-form-wrapper")
-    print(div_container)
-    iframe_container = div_container.ele("tag:iframe")
-    print(iframe_container)
+# 2026-10-20: rebuilt from the round-10 capture. /privacyform/ now serves a
+# people-search funnel; the data-subject request form is TrustArc's IRM page,
+# linked from members.idstrong.com/opt-out. Fields carry GUID ids, the two
+# dropdowns are react-select comboboxes (type, then click the option), there
+# is a confirmation checkbox, a hidden honeypot named irm_<timestamp> that
+# must stay empty, and reCAPTCHA v3 (api.js?render=6LdSn6gU...). 6 "No
+# element found." failures a day against the old OneTrust ids.
+TRUSTARC_URL = ("https://submit-irm.trustarc.com/services/validation/"
+                "8bec428f-079d-421f-8b6b-3ede6c5d5930/?brandId=beaae2c1-19bc-4369-9a5c-21ce0c61625c")
+F_NAME  = "00000000-0000-0000-0000-000000001002"
+F_EMAIL = "00000000-0000-0000-0000-000000001003"
+F_STATE = "00000000-0000-0000-0000-000000001004"   # "Resident of *"
+F_TYPE  = "00000000-0000-0000-0000-000000001005"   # "Type of Request *"
+F_DETAILS = "3551d89e-af3d-4b23-b9f2-1ee64b32e5c4"
+SUBMIT_ID = "8bec428f-079d-421f-8b6b-3ede6c5d5930-submit"
+RECAPTCHA_V3_KEY = "6LdSn6gUAAAAAKZ5SiEQ8PdCUOgV9sf1ei4utXrB"
 
-    state_select = iframe_container.ele("tag:input@@id=stateDSARElement")
-    state_select.click()
-    sleep(random.uniform(0.1,0.5))
-    select_onetrust_state(iframe_container, dataRow["State"])  # full-name/code tolerant (2026-09-24)
 
-    request_man = iframe_container.ele("tag:span@@text()= Myself ")
-    request_man.click()
+def _pick_combobox(page, input_id, candidates, broker):
+    """react-select: type into the combobox input, then click the option
+    whose text contains the candidate. Tries each candidate in turn."""
+    inp = page.ele("css:input#" + input_id, timeout=8)
+    if not inp:
+        raise RuntimeError("%s: combobox %s not on the form" % (broker, input_id[-4:]))
+    tried = []
+    for cand in [c for c in candidates if c]:
+        tried.append(cand)
+        try:
+            inp.click(); sleep(0.3); inp.clear(); inp.input(cand); sleep(1.0)
+        except Exception:
+            pass
+        low = cand.lower()
+        opt = page.ele("xpath://div[contains(@class,'select__option') and contains(translate(.,"
+                       "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), %r)]" % low, timeout=3)
+        if opt:
+            opt.click(); sleep(0.5)
+            return cand
+    raise RuntimeError("%s: no option matched for %s; tried %r" % (broker, input_id[-4:], tried))
 
-    request_type = iframe_container.ele("tag:span@@text()= Request to Delete Personal Information ")
-    request_type.click()
 
-    fName_input = iframe_container.ele("tag:input@@id=firstNameDSARElement")
-    fName_input.click()
-    print("typing the first name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fName_input, fName)
+def fill_input_data(page, dataRow):
+    broker = "idstrongcom"
+    state_raw = (dataRow.get("State") or "").strip()
+    if not state_raw:
+        raise missing_pii("State")
+    fill_field(page, "css:input#" + F_NAME, dataRow["Name"], broker=broker)
+    fill_field(page, "css:input#" + F_EMAIL, generate_email(dataRow["Name"]), broker=broker)
+    _pick_combobox(page, F_STATE, [_state_full_name(state_raw), state_raw], broker)
+    try:
+        chosen = _pick_combobox(page, F_TYPE, ["delete", "deletion", "erase", "opt out", "do not sell"], broker)
+        log_step(broker, "request type: %s" % chosen)
+    except Exception as e:
+        log_step(broker, "request type not chosen (%s); submitting without it" % e, logging.WARNING)
+    details = ("Please delete all records about me and stop selling or sharing my personal "
+               "information (CCPA/CPRA Sec. 1798.105/1798.120). Name: %s. State: %s. "
+               "Submitted by PrivacyDuck as the consumer's authorized agent." % (dataRow["Name"], state_raw))
+    fill_field(page, "css:textarea#" + F_DETAILS, details, required=False, broker=broker)
+    box = page.ele("css:input[type=checkbox][id^='00000000-0000-0000-0000-000000001007']", timeout=4)
+    if box:
+        try:
+            if not box.states.is_checked:
+                box.click()
+        except Exception:
+            box.click()
+    else:
+        log_step(broker, "confirmation checkbox not found", logging.WARNING)
+    # honeypot irm_<timestamp>: never touched.
 
-    lName_input = iframe_container.ele("tag:input@@id=lastNameDSARElement")
-    lName_input.click()
-    print("typing the last name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(lName_input, lName)
 
-    birthday = make_standard_num(dataRow['Birth Month']) + "/" + make_standard_num(dataRow["Birth Day"]) + "/" + str(dataRow["Birth Year"])
-
-    birth_input = iframe_container.ele("tag:input@@id=dateOfBirthDSARElement")
-    birth_input.click()
-    print("typing the birthday...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(birth_input, birthday)
-
-    email_input = iframe_container.ele("tag:input@@id=emailDSARElement")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
-
-    detail_textarea = iframe_container.ele("tag:textarea@@id=requestDetailsDSARElement")
-    detail_textarea.click()
-    print("typing the detail...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(detail_textarea, "...")
-
-    sleep(2)
-    
-
-def idstrongcom(dataRow, website_name, in_user_email, run_mode) : 
+def idstrongcom(dataRow, website_name, in_user_email, run_mode):
     page = None
-    try : 
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-        
-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-        screenshot_save_path = unique_shot_path(screentShotDir, "IDStrongCom", fName, lName)
-        
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            # "--incognito",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
-
-        port_arr = [
-            "10001",
-            "10002",
-            "10003",
-            "10004",
-            "10005",
-            "10006",
-            "10007",
-            "10008",
-            "10009",
-            "10010"
-        ]
-
-        random_number = random.randint(0, 9)
-
-        username = os.getenv("SMARTPROXY_USER", "")
-        password = os.getenv("SMARTPROXY_PASSWORD", "")
-        endpoint = os.getenv("SMARTPROXY_ENDPOINT", "isp.smartproxy.com")
-        port = port_arr[random_number]
-
-        proxy_extension = proxies(username, password, endpoint, port)
-
-        options = get_chromium_options(arguments).auto_port().add_extension("extension")
-
-        if run_mode == "headless" :
+    try:
+        fName = dataRow["Name"].split()[0]
+        lName = dataRow["Name"].split()[-1]
+        screenshot_save_path = unique_shot_path(screentShotDir, "IdstrongCom", fName, lName)
+        arguments = ["-no-first-run", "--start-maximized", "-disable-gpu", "-disable-sensors"]
+        options = get_chromium_options(arguments).auto_port()
+        if run_mode == "headless":
             options.headless()
-        
-        #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        page.get("https://www.idstrong.com/privacyform/")
-
-        sleep(1)
-
-        div_container = page.ele("tag:div@@class=ot-form-wrapper")
-        print(div_container)
-        page.wait.eles_loaded("tag:iframe")
-        iframe_root_container = div_container.ele("tag:iframe")
-        page.wait(2)
-
+        page.get(TRUSTARC_URL)
+        sleep(random.uniform(3, 5))
         fill_input_data(page, dataRow)
 
-        iframe_container = iframe_root_container.ele("tag:iframe@@title=reCAPTCHA")
-        rc_anchor_container = iframe_container("tag:div@@id=rc-anchor-container")
-        print(rc_anchor_container)
-        rc_anchor_container.click()
+        # reCAPTCHA v3: the page executes it on submit; a solved token is set
+        # on the hidden textarea as well, so either path has a token.
+        try:
+            solver = TwoCaptcha(os.getenv("TWOCAPTCHA_API_KEY", ""))
+            result = solver.recaptcha(sitekey=RECAPTCHA_V3_KEY, url=TRUSTARC_URL,
+                                      version="v3", action="submit", score=0.3)
+            page.run_js("var t=arguments[0];document.querySelectorAll(\"textarea[name='g-recaptcha-response']\")"
+                        ".forEach(function(e){e.value=t;});", result["code"])
+        except Exception as e:
+            log_step("idstrongcom", "v3 token not obtained (%s); relying on the page's own execute" % e,
+                     logging.WARNING)
 
+        btn = page.ele("css:button#" + SUBMIT_ID, timeout=8)
+        if not btn:
+            raise RuntimeError("idstrongcom: submit button not found")
+        btn.click()
+        submission_verdict(page, "idstrongcom", success_phrases=(
+            "thank you", "received", "submitted", "has been sent"), timeout=20)
         sleep(2)
-        
-        iframe_container1 = iframe_root_container.ele("tag:iframe@@title=recaptcha challenge expires in two minutes")
-        audio_button = iframe_container1.ele("tag:button@@id=recaptcha-audio-button")
-
-        print(audio_button)
-        audio_button.click()
-        audio_source = iframe_container1.ele("tag:audio@@id=audio-source").attr("src")
-        print(audio_source)
-
-        response = requests.get(audio_source)
-        with open(("__downloaded_%d.mp3" % __import__("threading").get_ident()), "wb") as file:
-            file.write(response.content)
-
-        sleep(1)
-
-        apiKey = os.getenv("TWOCAPTCHA_API_KEY", "")
-        solver = TwoCaptcha(apiKey)
-        print("Captcha is solving...")
-        try :
-            result = solver.audio(("__downloaded_%d.mp3" % __import__("threading").get_ident()), lang="en")
-            print("Captcha is solved.")
-            print(result["code"])
-            Code = result["code"]
-        except Exception as e:
-            print("Error: ", str(e))
-        audio_reponse_input = iframe_container1.ele("tag:input@@id=audio-response")
-        _human_type2(audio_reponse_input, Code)
-
-        verify_btn = iframe_container1.ele("tag:button@@id=recaptcha-verify-button")
-        verify_btn.click()
-
-        sleep(5)
-
-        submit_button = iframe_root_container.ele("tag:button@@id=dsar-webform-submit-button")
-        print(submit_button)
-        submit_button.click()
-        
-
-        
-        try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
-        
-    
-    except Exception as e:
-        try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
+        page.get_screenshot(screenshot_save_path)
+    except Exception:
+        try:
+            if page is not None:
+                page.get_screenshot(screenshot_save_path)
+        except Exception:
+            pass
         raise
-
     finally:
         if page is not None:
             try:
                 page.quit()
             except Exception:
                 pass
-
     return screenshot_save_path
