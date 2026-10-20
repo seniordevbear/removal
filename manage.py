@@ -206,6 +206,85 @@ try:
 except Exception as _e:  # pyautogui is optional on non-desktop hosts
     log.warning("pyautogui fail-safe not disabled: %s", _e)
 
+# 1b. A broker whose site is simply gone looked exactly like a broken script.
+#    Chrome renders its own error page, the first page.ele() finds nothing,
+#    and the row was recorded as "ElementNotFoundError: No element found."
+#    Checked 19-20 Oct against 8.8.8.8 and 1.1.1.1 as well as the VPS:
+#      clustrmaps.com   -> A 127.0.0.1 everywhere (owner pointed it at
+#                          localhost; the site is deliberately dark)
+#      contacts411.com  -> no A record anywhere
+#      nuwber.com       -> no A record anywhere
+#    Between them that is roughly 264 of the 854 element-not-found failures
+#    in the 17-19 Oct logs, every one of them blamed on a selector.
+#    ChromiumPage.get() now looks at what actually loaded and raises
+#    SiteUnreachable, so the reason on the row names the site rather than a
+#    field. Same guard as the other patches: if the installed
+#    DrissionPage's get() does not look as expected, the patch stands down.
+
+
+class SiteUnreachable(RuntimeError):
+    """The browser never reached the broker: DNS failure, refused
+    connection, or Chrome's own error page."""
+
+
+_CHROME_ERROR_MARKERS = (
+    "ERR_NAME_NOT_RESOLVED", "ERR_CONNECTION_REFUSED", "ERR_CONNECTION_TIMED_OUT",
+    "ERR_CONNECTION_RESET", "ERR_CONNECTION_CLOSED", "ERR_ADDRESS_UNREACHABLE",
+    "ERR_NAME_RESOLUTION_FAILED", "ERR_INTERNET_DISCONNECTED",
+    "ERR_SSL_PROTOCOL_ERROR", "ERR_CERT_COMMON_NAME_INVALID",
+    "ERR_EMPTY_RESPONSE", "ERR_TOO_MANY_REDIRECTS",
+    "DNS_PROBE_FINISHED_NXDOMAIN", "DNS_PROBE_FINISHED_NO_INTERNET",
+)
+
+
+def _page_load_failure(page):
+    """Return the Chrome error code if the tab is showing an error page.
+
+    Deliberately narrow: the markers only appear on Chrome's interstitial,
+    and the check also requires the page to be small and form-free so a
+    broker page that merely MENTIONS one of these strings is not mistaken
+    for a failure."""
+    try:
+        html = page.html or ""
+    except Exception:
+        return None
+    if len(html) > 250000:
+        return None
+    for marker in _CHROME_ERROR_MARKERS:
+        if marker in html:
+            try:
+                if page.ele("tag:form", timeout=0.2):
+                    return None          # a real page that mentions the code
+            except Exception:
+                pass
+            return marker
+    return None
+
+
+try:
+    import inspect as _inspect_get
+    from DrissionPage import ChromiumPage as _CPG
+    _orig_cp_get = _CPG.get
+    if "url" not in _inspect_get.signature(_orig_cp_get).parameters:
+        raise RuntimeError("ChromiumPage.get has no 'url' parameter")
+
+    def _cp_get_checked(self, url, *a, **kw):
+        result = _orig_cp_get(self, url, *a, **kw)
+        try:
+            err = _page_load_failure(self)
+        except Exception:
+            err = None
+        if err:
+            raise SiteUnreachable("%s did not load: %s" % (url, err))
+        return result
+
+    _CPG.get = _cp_get_checked
+    log.info("browser navigation now reports an unreachable site as SiteUnreachable")
+except Exception as _e:
+    log.warning("page-load check not installed (%s); a dead site will still "
+                "look like a missing element", _e)
+
+
 # 2. Every element lookup waited DrissionPage's default 10s. Pages that load
 #    slowly through the proxy (privacy.deepsync.com still had id=first_name
 #    when checked, yet 66 rows "could not find" it) blew that budget, so the
