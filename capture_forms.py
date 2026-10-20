@@ -282,6 +282,15 @@ ROUND11 = {
     "costarcom": "https://www.costar.com/about/privacy-notice",
 }
 
+# Round 12 (2026-10-20). CoStar's Global Privacy Notice (captured in round 11)
+# names https://privacy.costar.com/DSAR-submission/ as the place to "complete
+# our online form"; the OneTrust webform id the script used returns 135 bytes
+# and is dead. The subdomain 403s anything that is not a real browser.
+ROUND12 = {
+    "costarcom": "https://privacy.costar.com/DSAR-submission/",
+}
+
+
 
 
 
@@ -348,7 +357,7 @@ def main():
 
     ok = fail = 0
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8, "round9": ROUND9, "round10": ROUND10, "round11": ROUND11}.get(arg, TARGETS)
+    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8, "round9": ROUND9, "round10": ROUND10, "round11": ROUND11, "round12": ROUND12}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)

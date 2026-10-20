@@ -153,7 +153,12 @@ def costarcom(dataRow, website_name, in_user_email, run_mode) :
         
         #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        page.get("https://privacyportal.onetrust.com/webform/69fc85af-b1e4-4eae-966b-cf91a3cca94c/5f1a45b9-bb79-49dc-ad4d-064548192246")
+        # 2026-10-20: the old OneTrust webform id returns 135 bytes from the VPS
+        # and from the web server - it is dead. CoStar's Global Privacy
+        # Notice names a dedicated submission page instead. The form behind
+        # it has not been captured yet (403 to anything but a real browser),
+        # so the *DSARElement selectors below are unverified against it.
+        page.get("https://privacy.costar.com/DSAR-submission/")
 
         sleep(random.uniform(1, 2))       
 

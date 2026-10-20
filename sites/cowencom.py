@@ -1,10 +1,13 @@
 from DrissionPage import ChromiumPage, ChromiumOptions
 from time import sleep
 import json
+import re
 import random
+import logging
 import os, datetime, pyautogui, requests
 from lib.common import generate_email, generate_phone_number
-from lib.broker_helpers import unique_shot_path
+from lib.broker_helpers import (unique_shot_path, fill_field, submission_verdict,
+                                missing_pii, log_step)
 
 now = datetime.datetime.now()
 current_date = now.strftime("%Y-%m-%d")
@@ -41,118 +44,100 @@ def _human_type2(element , text: str) -> None:
 
         sleep(random.uniform(0.05, 0.1))
 
-def fill_input_data(page, dataRow) : 
-    
-    fName = dataRow["Name"].split()[0] # split string based on space to get first name
-    lName = dataRow["Name"].split()[-1]# split string based on space to get last name
-
-    country_input = page.ele("tag:input@@name=et_pb_contact_country_0")
-    country_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(country_input, "United States")
-
-    state_input = page.ele("tag:input@@name=et_pb_contact_state_0")
-    state_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(state_input, dataRow["State"])
-
-    email_input = page.ele("tag:input@@name=et_pb_contact_email_0")
-    email_input.click()
-    print("typing the email...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(email_input, generate_email(dataRow["Name"]))
-
-    phone_input = page.ele("tag:input@@name=et_pb_contact_phone_0")
-    phone_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(phone_input, generate_phone_number())
-    
-    fullName_input = page.ele("tag:input@@name=et_pb_contact_name_0")
-    fullName_input.click()
-    print("typing the full name...")
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(fullName_input, fName)
-    
-    address_input = page.ele("tag:input@@name=et_pb_contact_address_0")
-    address_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(address_input, dataRow["Address"])
+# 2026-10-20: rebuilt from the round-11 capture. Cowen is Forian now, and
+# /privacy-do-not-sell-share/ redirects to the homepage; the consumer request
+# form lives at /privacy-consumer-requests/ (linked from the footer). It is a
+# Divi contact form - every field name is et_pb_contact_*_0 - with two
+# required selects whose option values are spelled out in full, and Divi's own
+# arithmetic captcha, whose two operands are published on the input as
+# data-first_digit / data-second_digit. No solver needed: read them and add.
+FORM_URL = "https://forian.com/privacy-consumer-requests/"
+REQUEST_TYPE = "Request to Delete Personal Information Obtained about You"
+WHO = "Consumer"
 
 
-    textarea_input = page.ele("tag:textarea@@name=et_pb_contact_message_0")
-    textarea_input.click()
-    sleep(random.uniform(0.1,0.5))
-    _human_type2(textarea_input, "I want to remove my info from your site.")
+def _answer_divi_captcha(page, broker):
+    """Divi publishes the sum's operands as attributes on the answer box."""
+    box = page.ele("css:input[name='et_pb_contact_captcha_0']", timeout=8)
+    if not box:
+        raise RuntimeError("cowencom: captcha box not on the form")
+    a, b = box.attr("data-first_digit"), box.attr("data-second_digit")
+    if not (a and b):
+        q = page.ele("css:.et_pb_contact_captcha_question", timeout=3)
+        nums = re.findall(r"\d+", (q.text if q else "") or "")
+        if len(nums) < 2:
+            raise RuntimeError("cowencom: could not read the captcha operands")
+        a, b = nums[0], nums[1]
+    total = str(int(a) + int(b))
+    box.click(); box.clear(); box.input(total)
+    log_step(broker, "captcha %s + %s = %s" % (a, b, total))
 
-def solve_cap_text(page) : 
 
-    result_input = page.ele("tag:input@@name=et_pb_contact_captcha_0")
-    first_num = result_input.attr("data-first_digit")
-    sencond_num = result_input.attr("data-second_digit")
+def fill_input_data(page, dataRow):
+    broker = "cowencom"
+    addr = ", ".join(x for x in (str(dataRow.get("Address") or "").strip(),
+                                 str(dataRow.get("City") or "").strip(),
+                                 str(dataRow.get("State") or "").strip(),
+                                 str(dataRow.get("Zipcode") or "").strip()) if x)
+    if not addr:
+        raise missing_pii("Address", "City", "State", "Zipcode")
 
-    result_num = int(first_num) + int(sencond_num)
-    _human_type2(result_input, str(result_num))
+    for name, value in (("et_pb_contact_request_type_0", REQUEST_TYPE),
+                        ("et_pb_contact_who_request_0", WHO)):
+        sel = page.ele("css:select[name='%s']" % name, timeout=10)
+        if not sel:
+            raise RuntimeError("cowencom: select %s not on the form" % name)
+        sel.select.by_value(value)
+        sleep(0.3)
 
-def cowencom(dataRow, website_name, in_user_email, run_mode) : 
+    fill_field(page, "css:input[name='et_pb_contact_name_0']", dataRow["Name"], broker=broker)
+    fill_field(page, "css:input[name='et_pb_contact_email_0']",
+               generate_email(dataRow["Name"]), broker=broker)
+    fill_field(page, "css:input[name='et_pb_contact_address_0']", addr, broker=broker)
+    fill_field(page, "css:textarea[name='et_pb_contact_message_0']",
+               "Please delete all personal information you hold about me and stop selling "
+               "or sharing it. Submitted by PrivacyDuck as the consumer's authorized agent.",
+               required=False, broker=broker)
+    _answer_divi_captcha(page, broker)
+
+
+def cowencom(dataRow, website_name, in_user_email, run_mode):
     page = None
-    try : 
-        sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"
-        errorConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=2&api=true&email={in_user_email}"
-
-        fName = dataRow["Name"].split()[0] # split string based on space to get first name
-        lName = dataRow["Name"].split()[-1]# split string based on space to get last name
+    screenshot_save_path = None
+    try:
+        fName = dataRow["Name"].split()[0]
+        lName = dataRow["Name"].split()[-1]
         screenshot_save_path = unique_shot_path(screentShotDir, "CowenCom", fName, lName)
-
-        arguments = [
-            "-no-first-run",
-            "--start-maximized",
-            # "--incognito",
-            "-disable-javascript",
-            "-disable-gpu",
-            "-disable-sensors",
-        ]
-
+        arguments = ["-no-first-run", "--start-maximized", "-disable-gpu", "-disable-sensors"]
         options = get_chromium_options(arguments).auto_port()
-        if run_mode == "headless" :
+        if run_mode == "headless":
             options.headless()
-        #Launch Website
         page = ChromiumPage(addr_or_opts=options)
-        page.get("https://forian.com/privacy-do-not-sell-share/")
-
+        page.get(FORM_URL)
+        sleep(random.uniform(3, 5))
         fill_input_data(page, dataRow)
 
-        solve_cap_text(page)
-
-        sleep(random.uniform(3, 5))
-        page.wait.ele_displayed("tag:button@@name=et_builder_submit_button")
-        submit_button = page.ele("tag:button@@name=et_builder_submit_button")
-        submit_button.click()
-        
-        sleep(random.uniform(0.5, 1))
-
-        try :
-            # response = requests.get(sucessConfirmationApi, timeout=10)
-            print("Success Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Success Confirmation API is failed: ", str(e))
-        
-    except Exception as e:
-        try :
-            # response = requests.get(errorConfirmationApi, timeout=10)
-            print("Error Confirmation API is sent successfully!")
-            sleep(5)
-            page.get_screenshot(screenshot_save_path)
-        except Exception as e:
-            print("Error Confirmation API is failed: ", str(e))
+        # The page also carries CleanTalk's hidden anti-spam fields; they are
+        # filled by its own JS in a real browser, so nothing to do here.
+        btn = page.ele("css:button[name='et_builder_submit_button']", timeout=8)
+        if not btn:
+            raise RuntimeError("cowencom: submit button not found")
+        btn.click()
+        submission_verdict(page, "cowencom", success_phrases=(
+            "thank you", "your request", "received", "submitted"), timeout=20)
+        sleep(2)
+        page.get_screenshot(screenshot_save_path)
+    except Exception:
+        try:
+            if page is not None and screenshot_save_path:
+                page.get_screenshot(screenshot_save_path)
+        except Exception:
+            pass
         raise
-
     finally:
         if page is not None:
             try:
                 page.quit()
             except Exception:
                 pass
-
     return screenshot_save_path
