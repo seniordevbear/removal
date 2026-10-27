@@ -53,7 +53,10 @@ FOLDERS = [f.strip() for f in os.getenv(
     "INBOX,Spam,Spam_Rejected,[Gmail]/Spam,[Gmail]/All Mail").split(",") if f.strip()]
 
 # link words in order of preference
-_LINK_WORDS = ("verify-dsr", "verify", "confirm", "removalrequest", "opt-out", "optout",
+# "dsar": CoStar's verification link is privacy.costar.com/DSAR-submission/?key=...
+# and carried none of the other words, so 26 mails on 26 Oct were "found but
+# no confirmation link".
+_LINK_WORDS = ("verify-dsr", "verify", "confirm", "removalrequest", "opt-out", "optout", "dsar",
                "removal", "remove", "validate", "activate", "token", "dsr")
 _SKIP_WORDS = ("unsubscribe", "privacy-policy", "privacypolicy", "terms", "zendesk.com/support",
                "customeriomail.com/unsubscribe", "facebook.com", "twitter.com", "linkedin.com",
@@ -71,7 +74,10 @@ def imap_connect():
     if not IMAP_PASSWORD:
         raise RuntimeError("CONFIRMATION_EMAIL_PASSWORD is not set; cannot read the confirmation mailbox")
     socket.setdefaulttimeout(40)
-    m = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+    # Explicit per-connection timeout as well: the global default only
+    # applies to sockets created while it is set, and the 24 Oct stall dumps
+    # had seven workers parked in imaplib.readline with nothing coming back.
+    m = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=40)
     m.login(IMAP_USER, IMAP_PASSWORD)
     return m
 

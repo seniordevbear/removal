@@ -77,6 +77,7 @@ def fill_input_data(page, dataRow) :
 
     yes_checkbox = page.ele("tag:input@@id=o_terms")
     yes_checkbox.click()
+    return email_str
 
 def searchpeoplefreecom(dataRow, website_name, in_user_email, run_mode) : 
     page = None
@@ -141,7 +142,10 @@ def searchpeoplefreecom(dataRow, website_name, in_user_email, run_mode) :
 
         sleep(3)
 
-        fill_input_data(page, dataRow)
+        # The alias the form was given is where the confirmation link arrives;
+        # it used to be read from a name that only existed inside
+        # fill_input_data (NameError on every run - 330 rows this week).
+        email_str = fill_input_data(page, dataRow)
 
         # 2026-10-04 capture: reCAPTCHA replaced by Cloudflare Turnstile
         # (0x4AAAAAAC0RR2lieIy55Ucx); the button e-mails a link that opens the

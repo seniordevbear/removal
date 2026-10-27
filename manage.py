@@ -1758,6 +1758,55 @@ def _requeue_fixed_domains():
                 pass
 
 
+def _requeue_restored_modules():
+    """Rows parked as step=4 'module_missing' whose script is present again.
+
+    2026-10-27: forty broker scripts were missing from the VPS checkout twice
+    this month; every row for them was marked step=4 module_missing - a
+    terminal state nothing revisits - and stayed there after the files came
+    back (cellrevealercom, callercentercom, arivifycom, ... 25 domains in the
+    last week alone, all tracked in git). Once an hour, any such domain whose
+    sites/<domain>.py exists gets its rows back in the queue."""
+    conn = None
+    try:
+        sites_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sites")
+        conn = _db_connect()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT DISTINCT target_domain FROM results "
+                "WHERE kind = 1 AND step = 4 "
+                "  AND data->>'" + _ERR_KEY + "' = 'module_missing'")
+            doms = [r[0] for r in cur.fetchall()]
+        finally:
+            cur.close()
+        back = [d for d in doms if os.path.exists(os.path.join(sites_dir, d + ".py"))]
+        if not back:
+            return
+        for i in range(0, len(back), 50):
+            chunk = back[i:i + 50]
+            placeholders = ",".join(["%s"] * len(chunk))
+            _update_by_ids(
+                conn,
+                "SELECT id FROM results WHERE kind = 1 AND step = 4 "
+                "  AND target_domain IN (" + placeholders + ") "
+                "  AND data->>'" + _ERR_KEY + "' = 'module_missing' "
+                "ORDER BY id LIMIT %s",
+                tuple(chunk) + (PII_REQUEUE_BATCH,),
+                "UPDATE results SET step = 0, "
+                "    data = JSON_REMOVE(data, '" + _ERR_KEY + "', '" + _ERR_AT_KEY + "') "
+                "WHERE id IN ({ids}) AND step = 4",
+                "restored-module requeue (%d domain(s))" % len(chunk))
+    except Exception:
+        log.exception("restored-module requeue failed")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _probe_dead_domains():
     """One row per dead broker per day, at the FRONT of the queue.
 
@@ -1785,8 +1834,15 @@ def _probe_dead_domains():
                 "FROM results r2 JOIN users u ON u.id = r2.user_id "
                 "WHERE r2.kind = 1 AND r2.step = 3 "
                 "  AND r2.target_domain NOT IN ("
+                # 2026-10-27: this looked only at step=0 rows, so the moment a
+                # probe failed (step=3) its domain counted as unprobed again and
+                # the next hourly pass requeued the same row: 20 domains x 24
+                # runs a day, two browser attempts each (row 121958 ran 14
+                # times on 26 Oct). A probe that succeeded is step=2 and its
+                # domain is no longer dead, so 0/1/3 covers every row stamped
+                # today and stays on the (kind, step, target_domain) index.
                 "      SELECT DISTINCT p.target_domain FROM results p "
-                "      WHERE p.kind = 1 AND p.step = 0 "
+                "      WHERE p.kind = 1 AND p.step IN (0, 1, 3) "
                 "        AND p.data->>'$.probe_at' = CAST(CURDATE() AS CHAR)) "
                 + ("  AND " + _covered_by_a_plan("u.id", users_alias="u") + " "
                    if REMOVAL_PAID_USERS_ONLY else "")
@@ -1864,6 +1920,7 @@ def maintenance_loop():
     _reap_all_chrome_at_startup()
     _refresh_stale_row_pii()
     _requeue_recovered_pii()
+    _requeue_restored_modules()
     while True:
         time.sleep(MAINTENANCE_INTERVAL_SECONDS)
         _recover_stale_claims()
@@ -1872,6 +1929,7 @@ def maintenance_loop():
         _requeue_recovered_pii()
         _requeue_fixed_domains()
         _probe_dead_domains()
+        _requeue_restored_modules()
 
 
 # The only two brokers that drive the real desktop mouse/keyboard via
@@ -2014,6 +2072,114 @@ def _note_domain_crash(domain):
         return n
 
 
+def _domain_crash_count(domain):
+    """Today's crash count for one domain (0 when none)."""
+    import datetime
+    with _domain_crashes_lock:
+        if _domain_crashes["date"] != datetime.date.today().isoformat():
+            return 0
+        return _domain_crashes["counts"].get(domain, 0)
+
+
+# 2026-10-27: DOMAIN_CRASHES_BEFORE_GIVEUP stopped a broken broker from
+# requeueing its rows, but not from being selected: once a script was broken
+# the worker still ran every one of its queued rows, two browser attempts
+# each, straight into step=3. On 26 Oct the fifteen worst domains took ~900
+# such runs (truepeoplesearchinfo 113, propeoplesearchcom 94, ...) - about a
+# fifth of the day's worker time - for 81 removals in total. A domain that
+# has crashed GIVEUP times today with no success today is now held out of
+# selection until midnight; a success today (the daily probe, a repaired
+# script) lifts the hold.
+_domain_ok_today = {"date": None, "domains": set()}
+
+
+def _note_domain_success(domain):
+    import datetime
+    today = datetime.date.today().isoformat()
+    with _domain_crashes_lock:
+        if _domain_ok_today["date"] != today:
+            _domain_ok_today["date"] = today
+            _domain_ok_today["domains"] = set()
+        _domain_ok_today["domains"].add(domain)
+
+
+def _tripped_domains():
+    """Domains whose script is broken *today*: GIVEUP crashes, no success."""
+    import datetime
+    today = datetime.date.today().isoformat()
+    with _domain_crashes_lock:
+        if _domain_crashes["date"] != today:
+            return set()
+        ok = _domain_ok_today["domains"] if _domain_ok_today["date"] == today else set()
+        return {d for d, n in _domain_crashes["counts"].items()
+                if n >= DOMAIN_CRASHES_BEFORE_GIVEUP and d not in ok}
+
+
+# 2026-10-27: the 2captcha balance hit zero on 25 Oct. Every captcha broker
+# then raised ApiException ERROR_ZERO_BALANCE, which the crash policy treated
+# like any other broker fault: 197 rows went to step=3 on 26 Oct and showed
+# in customer reports as failed removals. An empty captcha account is a
+# service outage, not a broker result: the row is requeued untouched and
+# every captcha-using broker is held out of selection for a while, so the
+# queue is not burned through while the balance is empty. One retry per
+# hold window notices when it has been topped up.
+_CAPTCHA_OUTAGE_MARKERS = ("ERROR_ZERO_BALANCE", "ERROR_KEY_DOES_NOT_EXIST",
+                           "ERROR_WRONG_USER_KEY", "ERROR_IP_NOT_ALLOWED",
+                           "ERROR_IP_BLOCKED")
+CAPTCHA_OUTAGE_HOLD_SECONDS = _get_env_float("CAPTCHA_OUTAGE_HOLD_SECONDS", 1800.0)
+_captcha_hold = {"until": 0.0, "why": ""}
+_CAPTCHA_DOMAINS_CACHE = None
+
+
+def _is_captcha_outage(exc):
+    text = type(exc).__name__ + ": " + str(exc)
+    return any(m in text for m in _CAPTCHA_OUTAGE_MARKERS)
+
+
+def _captcha_domains():
+    """Brokers whose script solves a captcha, discovered once from sites/
+    the way _email_broker_domains is: 122 scripts build their own TwoCaptcha,
+    two go through the lib helpers."""
+    global _CAPTCHA_DOMAINS_CACHE
+    if _CAPTCHA_DOMAINS_CACHE is None:
+        found = set()
+        sites_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sites")
+        try:
+            for fname in os.listdir(sites_dir):
+                if not fname.endswith(".py"):
+                    continue
+                try:
+                    with open(os.path.join(sites_dir, fname), "r", encoding="utf-8", errors="ignore") as f:
+                        body = f.read()
+                except OSError:
+                    continue
+                if ("TwoCaptcha(" in body or "solve_image_captcha_element(" in body
+                        or "set_turnstile_response(" in body):
+                    found.add(fname[:-3])
+        except OSError:
+            log.exception("could not scan sites/ for captcha brokers")
+        _CAPTCHA_DOMAINS_CACHE = found
+        log.info("captcha brokers discovered: %d", len(found))
+    return _CAPTCHA_DOMAINS_CACHE
+
+
+def _note_captcha_outage(exc, domain):
+    """Start (or extend) a hold; log once per hold so the cause is visible."""
+    now = time.time()
+    fresh = now >= _captcha_hold["until"]
+    _captcha_hold["until"] = now + CAPTCHA_OUTAGE_HOLD_SECONDS
+    _captcha_hold["why"] = _why(exc)
+    if fresh:
+        log.warning("CAPTCHA SERVICE UNUSABLE (%s on %s): holding %d captcha broker(s) "
+                    "out of selection for %.0f min - check the 2captcha balance/key",
+                    _captcha_hold["why"], domain, len(_captcha_domains()),
+                    CAPTCHA_OUTAGE_HOLD_SECONDS / 60.0)
+
+
+def _captcha_held_domains():
+    return _captcha_domains() if time.time() < _captcha_hold["until"] else set()
+
+
 def _process_removal_row(row):
     """Run ONE removal end-to-end on its own DB connection.
 
@@ -2057,7 +2223,10 @@ def _process_removal_row(row):
                         )
                         break
                     except Exception as e:
-                        if attempt < REMOVAL_TRANSIENT_RETRIES and _is_transient_dom_error(e):
+                        # No second attempt once the domain has tripped today:
+                        # it only doubles the cost of a known-broken script.
+                        if (attempt < REMOVAL_TRANSIENT_RETRIES and _is_transient_dom_error(e)
+                                and _domain_crash_count(row["target_domain"]) < DOMAIN_CRASHES_BEFORE_GIVEUP):
                             attempt += 1
                             log.info("transient %s on %s id=%s — retrying (%d/%d)",
                                      type(e).__name__, row["target_domain"], row["id"],
@@ -2066,6 +2235,7 @@ def _process_removal_row(row):
                             continue
                         raise
             _set_step(conn, row["id"], 2)
+            _note_domain_success(row["target_domain"])
             socketio.emit("complete", {
                 "id": row["id"], "user_id": row["user_id"],
                 "target_domain": row["target_domain"], "kind": 1,
@@ -2109,6 +2279,12 @@ def _process_removal_row(row):
             _set_step(conn, row["id"], 0)
             last_removal_processed_at.set(user_id_str, time.time())
         except Exception as e:
+            if _is_captcha_outage(e):
+                _note_captcha_outage(e, row["target_domain"])
+                _set_step(conn, row["id"], 0)
+                log.info("captcha outage: id=%s %s requeued untouched", row["id"], row["target_domain"])
+                last_removal_processed_at.set(user_id_str, time.time())
+                return
             log.exception("removal row failed id=%s", row["id"])
             crashes = _note_domain_crash(row["target_domain"])
             if crashes < DOMAIN_CRASHES_BEFORE_GIVEUP:
@@ -2132,6 +2308,7 @@ def _process_removal_row(row):
 
 
 _ccpa_exclusion_logged = [0]  # how many brokers were excluded last tick (log on change)
+_held_logged = [set()]        # tripped/captcha-held set as last logged
 
 
 _watchdog_beats = {}
@@ -2285,9 +2462,14 @@ def process_groups_removal():
                     else:
                         log.info("e-mail budgets reset — e-mail brokers back in selection")
                     _ccpa_exclusion_logged[0] = len(spent)
+                held = _tripped_domains() | _captcha_held_domains()
+                if held != _held_logged[0]:
+                    log.info("holding %d broker(s) out of selection: %d tripped today, %d captcha-held",
+                             len(held), len(_tripped_domains()), len(_captcha_held_domains()))
+                    _held_logged[0] = held
                 conn = _db_connect()
                 try:
-                    queue = get_pending_removal(conn, exclude_domains=tuple(spent))
+                    queue = get_pending_removal(conn, exclude_domains=tuple(spent | held))
                 finally:
                     conn.close()
                 last_fetch = time.time()
@@ -2304,6 +2486,7 @@ def process_groups_removal():
             # four slots. Keeping them means the next fetch waits the full
             # REMOVAL_REFETCH_SECONDS, as intended.
             kept = []
+            held_now = _tripped_domains() | _captcha_held_domains()
             for idx, row in enumerate(queue):
                 if slots <= 0:
                     kept.extend(queue[idx:])
@@ -2311,6 +2494,8 @@ def process_groups_removal():
                 if row["target_domain"] in _DESKTOP_AUTOMATION_BROKERS and inflight:
                     kept.append(row)    # needs the whole desktop; wait for a quiet pool
                     continue
+                if row["target_domain"] in held_now:
+                    continue            # dropped: script tripped today or captcha outage
                 user_id_str = str(row["user_id"])
                 last_ts = last_removal_processed_at.get_value(user_id_str)
                 # Pacing spreads one customer's 413 rows over seven days (one
