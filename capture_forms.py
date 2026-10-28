@@ -290,6 +290,57 @@ ROUND12 = {
     "costarcom": "https://privacy.costar.com/DSAR-submission/",
 }
 
+# ROUND 13 (2026-10-28). The 25 form brokers that block the most PAYING
+# customers and have never recorded a single success. Measured from the live
+# queue: each of the top nine blocks 163 of our ~165 paying customers.
+#
+# They fall into three template families, so one capture fixes several
+# scripts at once - the selectors below are what each script currently looks
+# for and no longer finds:
+#
+#   A. "/ng/control/privacy"  vericora, verecor, persontrust, pub360
+#      (shared ids: city_state, topsearch, url, user_email, recaptcha-token)
+#   B. "/help-center/privacy-requests"  publicinfoservices, searchpublicrecords,
+#      spyfly (shared ids: firstName, lastName, city, zip)
+#   C. the "/optout" family  truepeoplesearch.info and propeoplesearch are
+#      selector-identical (name=address/city/email); fastpeoplesearch and
+#      idtrue are the same form with id= instead of name=.
+#
+# Excluded on purpose: faradayio (Google Form returning HTTP 400 - a different
+# fault), texasarrestwarrantsorg / arrestwarrantorg (the arrests helper finds
+# no opt-out path at all, so a capture of a 404 teaches us nothing), and
+# clustrmapscom / contacts411com (DNS dead - the sites are gone).
+ROUND13 = {
+    # family A
+    "vericoracom": "https://vericora.com/ng/control/privacy",
+    "verecorcom": "https://verecor.com/ng/control/privacy",
+    "persontrustcom": "https://persontrust.com/ng/control/privacy",
+    "pub360com": "https://pub360.com/control/privacy",
+    # family B
+    "publicinfoservicescom": "https://www.publicinfoservices.com/help-center/privacy-requests",
+    "searchpublicrecordscom": "https://www.searchpublicrecords.com/help-center/privacy-requests",
+    "spyflycom": "https://www.spyfly.com/help-center/privacy-requests",
+    # family C
+    "truepeoplesearchinfo": "https://truepeoplesearch.info/optout",
+    "propeoplesearchcom": "https://propeoplesearch.com/optout",
+    "fastpeoplesearchinfo": "https://fastpeoplesearch.info/optout",
+    "peoplesearchpro": "https://peoplesearch.pro/optout",
+    "idtruecom": "https://www.idtrue.com/optout",
+    "peoplesearchnowcom": "https://www.peoplesearchnow.com/opt-out",
+    # individually large
+    "advancedbackgroundcheckscom": "https://www.advancedbackgroundchecks.com/opt-out",
+    "searchpeoplefreecom": "https://www.searchpeoplefree.com/opt-out",
+    "insideviewcom": "https://www.demandbase.com/privacy-center.html?ketch_preferences_tab=rightsTab",
+    "dataaxlecom": "https://www.data-axle.com/privacy-rights-request/",
+    "optoutprescreencom": "https://www.optoutprescreen.com/",
+    "greatlakeslistscom": "https://greatlakeslists.com/opt_out_request.php",
+    "reversephonecheckcom": "https://www.reversephonecheck.com/optout/",
+    "idcrawlcom": "https://www.idcrawl.com/remove-my-information",
+    "findpeoplesearchcom": "https://www.findpeoplesearch.com/optout",
+    "backgroundcheckco": "https://www.backgroundcheck.co/optout",
+    "herecom": "https://legal.here.com/privacy/data-subject-request",
+}
+
 
 
 
@@ -357,7 +408,7 @@ def main():
 
     ok = fail = 0
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8, "round9": ROUND9, "round10": ROUND10, "round11": ROUND11, "round12": ROUND12}.get(arg, TARGETS)
+    targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8, "round9": ROUND9, "round10": ROUND10, "round11": ROUND11, "round12": ROUND12, "round13": ROUND13}.get(arg, TARGETS)
     for broker, url in targets.items():
         try:
             page.get(url, timeout=30)
