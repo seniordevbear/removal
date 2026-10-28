@@ -1776,7 +1776,8 @@ def _requeue_restored_modules():
             cur.execute(
                 "SELECT DISTINCT target_domain FROM results "
                 "WHERE kind = 1 AND step = 4 "
-                "  AND data->>'" + _ERR_KEY + "' = 'module_missing'")
+                "  AND data->>'" + _ERR_KEY + "' = 'module_missing' "
+                "  AND COALESCE(data->>'$.module_retry', 0) = 0")
             doms = [r[0] for r in cur.fetchall()]
         finally:
             cur.close()
@@ -1791,10 +1792,17 @@ def _requeue_restored_modules():
                 "SELECT id FROM results WHERE kind = 1 AND step = 4 "
                 "  AND target_domain IN (" + placeholders + ") "
                 "  AND data->>'" + _ERR_KEY + "' = 'module_missing' "
+                "  AND COALESCE(data->>'$.module_retry', 0) = 0 "
                 "ORDER BY id LIMIT %s",
                 tuple(chunk) + (PII_REQUEUE_BATCH,),
+                # $.module_retry is stamped as the row is requeued, so each row
+                # gets exactly one go. Without it this pass had no memory: every
+                # hour it re-selected the same rows it had requeued the hour
+                # before, and rows whose script exists but refuses to run looped
+                # for as long as the process stayed up.
                 "UPDATE results SET step = 0, "
-                "    data = JSON_REMOVE(data, '" + _ERR_KEY + "', '" + _ERR_AT_KEY + "') "
+                "    data = JSON_SET(JSON_REMOVE(data, '" + _ERR_KEY + "', '" + _ERR_AT_KEY + "'), "
+                "                    '$.module_retry', 1) "
                 "WHERE id IN ({ids}) AND step = 4",
                 "restored-module requeue (%d domain(s))" % len(chunk))
     except Exception:
@@ -2256,10 +2264,22 @@ def _process_removal_row(row):
                     "removal id=%s domain=%s user=%s completed WITHOUT evidence (path=%r)",
                     row["id"], row["target_domain"], row["user_id"], path)
             last_removal_processed_at.set(user_id_str, time.time())
-        except (RemovalModuleMissing, NotImplementedError):
+        except RemovalModuleMissing:
+            # The sites/<domain>.py file is genuinely absent from this
+            # checkout. Recoverable: the file can come back (it has twice).
             _set_step(conn, row["id"], 4, "module_missing")
             # Don't update the pacing timer — a missing-module
             # "skip" shouldn't burn this user's rate window.
+        except NotImplementedError as e:
+            # 2026-10-28: this used to be stored as "module_missing" too, so a
+            # broker we deliberately retired (31 of them: seized domains,
+            # parked domains, forms that now demand an SSN) was indistinguishable
+            # from a file that had gone walkabout. The restored-module requeue
+            # then saw sites/<domain>.py sitting right there, put the rows back,
+            # and the stub raised again - 6,689 step-4 writes for 2,059 rows in
+            # one morning. The reason now carries the retirement note the script
+            # itself documents, and nothing requeues it.
+            _set_step(conn, row["id"], 4, "retired: " + str(e)[:180])
         except IncompletePII as e:
             _set_step(conn, row["id"], 5, "missing_pii:" + ",".join(e.args[0]))
         except CCPADailyLimitReached as e:
