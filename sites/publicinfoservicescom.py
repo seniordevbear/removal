@@ -7,6 +7,7 @@ from twocaptcha import TwoCaptcha
 from lib.common import generate_email, generate_phone_number
 from lib.broker_helpers import user_age
 from lib.broker_helpers import unique_shot_path
+from lib.broker_helpers import field_by_placeholder
 
 api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
 solver = TwoCaptcha(api_key)
@@ -76,7 +77,9 @@ def fill_input_data(page, dataRow) :
     first_name.click()
     _human_type2(first_name, fName)
 
-    last_name = page.ele("tag:input@@id=lastName")
+    # id="lastName" became an opaque build-time hash (28 Oct capture);
+    # the placeholder is the stable handle.
+    last_name = field_by_placeholder(page, "Last Name", fallback_id="lastName")
     last_name.clear()
     last_name.click()
     _human_type2(last_name, lName)

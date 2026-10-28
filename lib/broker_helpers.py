@@ -131,6 +131,37 @@ def screenshot_step(page, broker: str, step: str, base_dir: Optional[str] = None
         return None
 
 
+def field_by_placeholder(page, placeholder, fallback_id=None, timeout=10):
+    """Find an input by its visible placeholder, falling back to an id.
+
+    2026-10-28: publicinfoservices / searchpublicrecords / spyfly share one
+    privacy-request template, and in it the Last Name input lost
+    id="lastName" and became id="O4dd819765b2bf7aa" - the same opaque id on
+    all three sites, so it is a build-time hash rather than a per-load
+    random. Every run died on that one field while the other four ids
+    (firstName, city, zip, email) were untouched. The placeholder is the part
+    a human reads, so it is what the next rename will leave alone.
+    """
+    for sel in ('tag:input@@placeholder=%s' % placeholder,
+                'tag:input@@placeholder:%s' % placeholder):
+        try:
+            ele = page.ele(sel, timeout=timeout)
+        except Exception:
+            ele = None
+        if ele:
+            return ele
+        timeout = 2          # only the first lookup waits the full timeout
+    if fallback_id:
+        try:
+            ele = page.ele('tag:input@@id=%s' % fallback_id, timeout=2)
+        except Exception:
+            ele = None
+        if ele:
+            return ele
+    raise RuntimeError('no input with placeholder %r (fallback id %r)'
+                       % (placeholder, fallback_id))
+
+
 def unique_shot_path(shot_dir, label, first_name, last_name):
     """Build the legacy per-broker screenshot path, with a unique suffix.
 

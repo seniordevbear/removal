@@ -346,6 +346,44 @@ ROUND13 = {
 
 
 
+# Chrome renders its own error page for a dead host, and round 13 saved six
+# NXDOMAIN pages, a 404, a 503 and a parked gambling site all as "ok" - the
+# navigation succeeded, so nothing looked wrong in the log. Classify what came
+# back, so a dead broker is reported as dead instead of as a capture.
+DEAD_MARKERS = (
+    ("DNS_PROBE_FINISHED_NXDOMAIN", "domain does not resolve"),
+    ("ERR_NAME_NOT_RESOLVED", "domain does not resolve"),
+    ("ERR_CONNECTION_REFUSED", "connection refused"),
+    ("This site can\u2019t be reached", "chrome error page"),
+    ("This site can't be reached", "chrome error page"),
+    ("Transferred by Court Order", "domain seized by court order"),
+    ("521: Web server is down", "origin down (Cloudflare 521)"),
+)
+DEAD_TITLES = ("404 not found", "403 forbidden", "503 service temporarily unavailable",
+               "attention required! | cloudflare", "just a moment")
+
+
+def classify(html, title, url, final_url):
+    """Return None when the page looks like a real form, else why it does not."""
+    t = (title or "").strip().lower()
+    for frag in DEAD_TITLES:
+        if frag in t:
+            return "dead: %s" % (title or "").strip()
+    for marker, why in DEAD_MARKERS:
+        if marker in html:
+            return "dead: %s" % why
+    try:
+        from urllib.parse import urlsplit
+        want, got = urlsplit(url).netloc.lower(), urlsplit(final_url or url).netloc.lower()
+        if want and got and want.lstrip("www.") != got.lstrip("www."):
+            return "redirected off-site to %s" % got
+    except Exception:
+        pass
+    if html.count("<input") == 0:
+        return "no form fields on the page"
+    return None
+
+
 def log(msg):
     line = time.strftime("%H:%M:%S ") + msg
     print(line, flush=True)
@@ -407,6 +445,7 @@ def main():
     log("browser open")
 
     ok = fail = 0
+    dead = []
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
     targets = {"round2": ROUND2, "round3": ROUND3, "round4": ROUND4, "round5": ROUND5, "round6": ROUND6, "round7": ROUND7, "round8": ROUND8, "round9": ROUND9, "round10": ROUND10, "round11": ROUND11, "round12": ROUND12, "round13": ROUND13}.get(arg, TARGETS)
     for broker, url in targets.items():
@@ -430,8 +469,13 @@ def main():
             with open(os.path.join(OUT, broker + ".html"), "w", encoding="utf-8") as f:
                 f.write(page.html)
             page.get_screenshot(os.path.join(OUT, broker + ".png"), full_page=True)
-            log("ok    %-28s %s" % (broker, page.url))
-            ok += 1
+            why = classify(page.html, page.title, url, page.url)
+            if why:
+                log("DEAD  %-28s %s  (%s)" % (broker, page.url, why))
+                dead.append((broker, why))
+            else:
+                log("ok    %-28s %s" % (broker, page.url))
+                ok += 1
         except Exception as e:
             log("FAIL  %-28s %s  %s: %s" % (broker, url, type(e).__name__, str(e)[:120]))
             fail += 1
@@ -441,6 +485,8 @@ def main():
     except Exception:
         pass
     log("done: %d ok, %d failed. Zip the capture_forms folder and upload it." % (ok, fail))
+    for broker, why in dead:
+        log("  DEAD %-28s %s" % (broker, why))
     return 0
 
 
