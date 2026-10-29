@@ -107,6 +107,11 @@ def fill_input_data(page, dataRow) :
     _human_type2(zip_input, str(dataRow["Zipcode"]))
 
 def propeoplesearchcom(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct - verified 2026-10-29, and again with the owner's sign-off to
+    # drop these twelve from the covered-sites list. NotImplementedError ->
+    # step=4 "retired", which the pipeline does not retry. Original script
+    # kept below, unreachable, in case the domain is ever revived.
+    raise NotImplementedError("propeoplesearchcom: propeoplesearch.com/optout returns 404; the opt-out form no longer exists (2026-10-29)")
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name

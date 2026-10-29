@@ -76,6 +76,11 @@ def fill_input_data(page, dataRow) :
 
 
 def reversephonecheckcom(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct - verified 2026-10-29, and again with the owner's sign-off to
+    # drop these twelve from the covered-sites list. NotImplementedError ->
+    # step=4 "retired", which the pipeline does not retry. Original script
+    # kept below, unreachable, in case the domain is ever revived.
+    raise NotImplementedError("reversephonecheckcom: reversephonecheck.com does not resolve (NXDOMAIN, confirmed from two machines 2026-10-29)")
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name

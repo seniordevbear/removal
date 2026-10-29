@@ -106,6 +106,11 @@ def fill_input_data(page, dataRow) :
 
 
 def peoplesearchpro(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct - verified 2026-10-29, and again with the owner's sign-off to
+    # drop these twelve from the covered-sites list. NotImplementedError ->
+    # step=4 "retired", which the pipeline does not retry. Original script
+    # kept below, unreachable, in case the domain is ever revived.
+    raise NotImplementedError("peoplesearchpro: peoplesearch.pro origin is down (Cloudflare 521) and has been through the whole round-13 window (2026-10-29)")
     page = None
     try : 
         fName = dataRow["Name"].split()[0] # split string based on space to get first name

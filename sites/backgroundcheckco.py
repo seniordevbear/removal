@@ -119,6 +119,11 @@ def fill_input_data(page, dataRow) :
     submit_button.click()
 
 def backgroundcheckco(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct - verified 2026-10-29, and again with the owner's sign-off to
+    # drop these twelve from the covered-sites list. NotImplementedError ->
+    # step=4 "retired", which the pipeline does not retry. Original script
+    # kept below, unreachable, in case the domain is ever revived.
+    raise NotImplementedError("backgroundcheckco: backgroundcheck.co does not resolve (NXDOMAIN, confirmed from two machines 2026-10-29)")
     page = None
     try : 
         sucessConfirmationApi = f"https://privacypros.com/web/dashboard/appendapi.php?website={website_name}&status=1&api=true&email={in_user_email}"

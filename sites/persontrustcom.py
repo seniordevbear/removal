@@ -46,6 +46,11 @@ def _human_type2(element , text: str) -> None:
         sleep(random.uniform(0.05, 0.1))
 
 def persontrustcom(dataRow, website_name, in_user_email, run_mode) : 
+    # Defunct - verified 2026-10-29, and again with the owner's sign-off to
+    # drop these twelve from the covered-sites list. NotImplementedError ->
+    # step=4 "retired", which the pipeline does not retry. Original script
+    # kept below, unreachable, in case the domain is ever revived.
+    raise NotImplementedError("persontrustcom: persontrust.com does not resolve (NXDOMAIN, confirmed from two machines 2026-10-29)")
     page = None
     try : 
         
