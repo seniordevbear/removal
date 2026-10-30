@@ -2135,7 +2135,16 @@ _CAPTCHA_OUTAGE_MARKERS = ("ERROR_ZERO_BALANCE", "ERROR_KEY_DOES_NOT_EXIST",
                            "ERROR_WRONG_USER_KEY", "ERROR_IP_NOT_ALLOWED",
                            "ERROR_IP_BLOCKED")
 CAPTCHA_OUTAGE_HOLD_SECONDS = _get_env_float("CAPTCHA_OUTAGE_HOLD_SECONDS", 1800.0)
-_captcha_hold = {"until": 0.0, "why": ""}
+# 2026-10-30: the 29 Oct log shows the balance empty from 03:44 to midnight and
+# a fixed 30-minute hold probing it 40 times over the day - 251 browser launches
+# that could only fail, because every worker free when a window opened grabbed a
+# captcha row before the first failure re-armed the hold. The wait now doubles
+# each time the probe finds the service still down (30m, 1h, 2h, capped at 4h)
+# and resets the moment a captcha broker succeeds, so an outage that lasts a day
+# costs a handful of attempts instead of hundreds, while a balance topped up at
+# noon is still noticed within the hour.
+CAPTCHA_OUTAGE_HOLD_MAX_SECONDS = _get_env_float("CAPTCHA_OUTAGE_HOLD_MAX_SECONDS", 14400.0)
+_captcha_hold = {"until": 0.0, "why": "", "wait": 0.0}
 _CAPTCHA_DOMAINS_CACHE = None
 
 
@@ -2175,13 +2184,22 @@ def _note_captcha_outage(exc, domain):
     """Start (or extend) a hold; log once per hold so the cause is visible."""
     now = time.time()
     fresh = now >= _captcha_hold["until"]
-    _captcha_hold["until"] = now + CAPTCHA_OUTAGE_HOLD_SECONDS
+    if fresh:
+        # A probe went out and the service is still down: wait twice as long
+        # before the next one. A first outage starts at the base wait.
+        prev = _captcha_hold["wait"]
+        wait = min(CAPTCHA_OUTAGE_HOLD_MAX_SECONDS,
+                   prev * 2 if prev else CAPTCHA_OUTAGE_HOLD_SECONDS)
+        _captcha_hold["wait"] = wait
+    else:
+        wait = _captcha_hold["wait"] or CAPTCHA_OUTAGE_HOLD_SECONDS
+    _captcha_hold["until"] = now + wait
     _captcha_hold["why"] = _why(exc)
     if fresh:
         log.warning("CAPTCHA SERVICE UNUSABLE (%s on %s): holding %d captcha broker(s) "
                     "out of selection for %.0f min - check the 2captcha balance/key",
                     _captcha_hold["why"], domain, len(_captcha_domains()),
-                    CAPTCHA_OUTAGE_HOLD_SECONDS / 60.0)
+                    wait / 60.0)
 
 
 def _captcha_held_domains():
@@ -2244,6 +2262,11 @@ def _process_removal_row(row):
                         raise
             _set_step(conn, row["id"], 2)
             _note_domain_success(row["target_domain"])
+            if _captcha_hold["wait"] and row["target_domain"] in _captcha_domains():
+                # The service answered: drop the backoff so the next outage
+                # starts from the base wait rather than hours.
+                _captcha_hold["wait"] = 0.0
+                _captcha_hold["until"] = 0.0
             socketio.emit("complete", {
                 "id": row["id"], "user_id": row["user_id"],
                 "target_domain": row["target_domain"], "kind": 1,
