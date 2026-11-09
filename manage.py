@@ -83,6 +83,33 @@ from __removal import (
     ModuleMissing as RemovalModuleMissing,
     IncompletePII,
 )
+# --- .env, before any lib import -------------------------------------------
+# 2026-11-09: this used to run at line 494, four hundred lines after
+# `from lib.broker_helpers import ...` on line 86. broker_helpers reads
+# CCPA_TOTAL_PER_DAY at import time, so the value was fixed before the file
+# that sets it had been read: the cap sat on its 50 default no matter what
+# .env said, and setting it to 150 changed nothing for days while the daily
+# removals stayed at exactly 50, 52, 51. Any module-level os.getenv in a lib
+# had the same problem. Loading here fixes all of them at once.
+def _load_env_file(env_path):
+    """KEY=value lines, # comments skipped, a real environment variable wins."""
+    if not os.path.exists(env_path):
+        return False
+    with open(env_path, "r", encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("'").strip('"')
+            if key and key not in os.environ:
+                os.environ[key] = value
+    return True
+
+
+_load_env_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
 from lib.broker_helpers import (
     CCPADailyLimitReached,
     ccpa_global_quota_reached,
@@ -381,6 +408,8 @@ try:
     # failed before opening the page: 11 of the 22 failures on the afternoon
     # of 14 Oct. The ceiling lives in _HC_TIMEOUT alone.
     log.info("captcha solve ceiling: %s (hcaptcha %.0fs)", _TC_APPLY, _HC_TIMEOUT)
+log.info("daily e-mail budgets: CCPA_TOTAL_PER_DAY=%s, EMAIL_SENDER_TOTAL_PER_DAY=%s",
+         CCPA_TOTAL_PER_DAY, _get_env_int("EMAIL_SENDER_TOTAL_PER_DAY", 250))
 except Exception as _e:
     log.warning("twocaptcha timeout patch skipped (stock 600s reCAPTCHA ceiling stays): %s", _e)
 
@@ -453,23 +482,8 @@ if len(_log_handlers) > 1:            # only when file logging is up
     sys.stderr = _TeeToLog(sys.stderr, "err")
 
 
-# ----- env loading ----------------------------------------------------------
-
-def _load_env_file(env_path):
-    if not os.path.exists(env_path):
-        return
-    with open(env_path, "r", encoding="utf-8") as f:
-        for raw_line in f:
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip("'").strip('"')
-            if key and key not in os.environ:
-                os.environ[key] = value
-
-
+# ----- env settings ---------------------------------------------------------
+# (.env itself is loaded at the top of this file, before the lib imports.)
 def _get_env_bool(key, default=False):
     value = os.getenv(key)
     if value is None:
@@ -491,7 +505,6 @@ def _get_env_float(key, default):
         return default
 
 
-_load_env_file(os.path.join(os.path.dirname(__file__), ".env"))
 enable_automation_delays()
 
 
