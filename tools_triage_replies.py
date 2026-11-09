@@ -57,71 +57,16 @@ _ENV_FOUND = _load_env_file(os.path.join(_HERE, ".env"))
 from lib.email_verification import imap_connect, FOLDERS
 from lib.mailbox_sweep import _text, _broker_from_sender
 
-# Ordered: the first pattern that matches wins, so a refusal is not filed as a
-# polite acknowledgement just because it opens with "thank you for contacting".
-CATEGORIES = [
-    ("no_data_found", re.compile(
-        r"(did not|could ?n[o']?t|were unable to|unable to) (find|locate|identify)[^.]{0,40}"
-        r"(any )?(data|record|information|match)|no (data|records?|information|results?) "
-        r"(was |were )?(found|located|associated|linked)|not (found|located) in our", re.I)),
-    ("needs_verification", re.compile(
-        r"(provide|submit|upload|attach|send)[^.]{0,60}"
-        r"(government[- ]issued|photo )?(id|identification|driver'?s licen[cs]e|passport|"
-        r"proof of (identity|residence)|notari[sz]ed)|verify your identity|"
-        r"identity verification|additional (information|documentation) (is )?(required|needed)", re.I)),
-    ("action_required", re.compile(
-        r"click (the|this) link|confirm your (request|e-?mail)|complete (the|your) (form|request)|"
-        r"within \d+ (business )?days? (or|to avoid)|we need you to|please (reply|respond|complete)", re.I)),
-    ("refused", re.compile(
-        r"(we )?(are )?(unable|cannot|can not|can'?t|decline|denied|deny|refuse)[^.]{0,50}"
-        r"(process|fulfil|fulfill|complete|honor|honour|comply)|"
-        r"request (has been |was )?(denied|rejected|closed without)|not subject to|"
-        r"does not apply to|outside the scope", re.I)),
-    ("completed", re.compile(
-        r"(has been|have been|was|were|is now)[^.]{0,30}"
-        r"(removed|deleted|suppressed|opted out|processed|completed|fulfilled)|"
-        r"we have (removed|deleted|processed|completed)|your (request|record)[^.]{0,30}"
-        r"(is )?(complete|closed|fulfilled)|successfully (removed|deleted|processed)", re.I)),
-    ("received_only", re.compile(
-        r"(request|ticket|case|message) (\(?#?\d+\)? )?(has been |was )?received|"
-        r"we have received|thank you for (contacting|reaching out|your request)|"
-        r"is being reviewed|we will (review|respond|get back)", re.I)),
-]
-BOUNCE = re.compile(r"undeliverable|delivery (status|has failed)|mail delivery|returned to sender", re.I)
-AUTOREPLY = re.compile(r"out of (the )?office|auto(matic)?[- ]?reply|vacation", re.I)
-
-
-def classify(subject, body):
-    text = (subject or "") + "\n" + (body or "")
-    if BOUNCE.search(text):
-        return "bounce"
-    if AUTOREPLY.search(subject or ""):
-        return "autoreply"
-    for name, pat in CATEGORIES:
-        if pat.search(text):
-            return name
-    return "unclassified"
-
-
-# What each bucket means for the customer's row, in plain words.
-MEANING = {
-    "no_data_found":      "broker says it holds nothing - row should be 'not listed', not 'removed'",
-    "needs_verification": "broker wants ID before acting - the removal has NOT happened",
-    "action_required":    "broker is waiting on us - a link, a form, a deadline",
-    "refused":            "broker declined - the removal has NOT happened",
-    "completed":          "broker confirms the removal - the row is honest",
-    "received_only":      "acknowledgement only, no outcome yet",
-    "bounce":             "address is dead (mailbox_sweep already handles these)",
-    "autoreply":          "ignore",
-    "unclassified":       "needs a human eye",
-}
-
+from lib.broker_replies import classify, is_broker_reply, MEANING, CATEGORIES
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=90)
     ap.add_argument("--csv", default="")
     ap.add_argument("--show", type=int, default=3, help="example subjects per bucket")
+    ap.add_argument("--all-mail", action="store_true",
+                    help="also scan [Gmail]/All Mail - it contains Sent, so our own "
+                         "requests get counted as replies; off by default")
     args = ap.parse_args()
 
     try:
@@ -138,10 +83,13 @@ def main():
             % (e, env, "found" if _ENV_FOUND else "NOT FOUND",
                ", ".join(missing) or "none - so the server or password is being refused"))
 
+    # All Mail holds a copy of everything we sent, so it is excluded unless the
+    # caller asks for it. INBOX and Spam are where replies actually land.
+    folders = [f for f in FOLDERS if args.all_mail or "all mail" not in f.lower()]
     since = time.strftime("%d-%b-%Y", time.gmtime(time.time() - args.days * 86400))
     counts, examples, per_broker, rows = Counter(), {}, Counter(), []
-    scanned = 0
-    for folder in FOLDERS:
+    scanned = skipped_not_broker = 0
+    for folder in folders:
         try:
             typ, _ = m.select('"%s"' % folder, readonly=True)   # readonly: nothing is marked read
         except Exception:
@@ -163,6 +111,9 @@ def main():
             scanned += 1
             subject = (msg.get("subject") or "")[:200]
             sender = parseaddr(msg.get("from") or "")[1]
+            if not is_broker_reply(sender):
+                skipped_not_broker += 1
+                continue
             body = _text(msg)[:6000]
             cat = classify(subject, body)
             counts[cat] += 1
@@ -178,7 +129,10 @@ def main():
     except Exception:
         pass
 
-    print("\nscanned %d messages from the last %d days (nothing was marked read)\n" % (scanned, args.days))
+    print("\nread %d messages from the last %d days in %s (nothing was marked read)"
+          % (scanned, args.days, ", ".join(folders)))
+    print("  %d were not broker replies (our own sent mail, Google and vendor notices) - not counted" % skipped_not_broker)
+    print("  %d genuine broker replies\n" % (scanned - skipped_not_broker))
     width = max((len(k) for k in counts), default=10)
     for cat, n in counts.most_common():
         print("  %-*s %5d   %s" % (width, cat, n, MEANING.get(cat, "")))

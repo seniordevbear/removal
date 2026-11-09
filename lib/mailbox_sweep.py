@@ -127,8 +127,38 @@ def _broker_from_sender(sender):
     return re.sub(r"[^a-z0-9]", "", host) if host else ""
 
 
+def _record_reply(conn, user_id, broker, category, subject):
+    """Write what the broker said onto that customer's row for that broker.
+
+    The step is deliberately left alone. "We hold no data about this person"
+    probably means the customer was never listed, which is a fine outcome and
+    a bad label - but turning 7,620 rows from "removed" into something else is
+    the owner's call, not a sweep's. What the sweep can do is stop the answer
+    being thrown away: the row now carries the broker's own verdict and the
+    date, so a report, an audit or a person can tell "we removed you" from
+    "they had nothing on you" instead of printing the same word for both.
+    """
+    if not (conn and user_id and broker and category):
+        return 0
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE results SET data = JSON_SET(COALESCE(data, '{}'), "
+            "  '$.broker_reply', %s, "
+            "  '$.broker_reply_at', NOW(), "
+            "  '$.broker_reply_subject', %s), "
+            "  updated_at = updated_at "
+            "WHERE user_id = %s AND target_domain = %s AND kind = 1",
+            (category, (subject or "")[:180], user_id, broker))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        cur.close()
+
+
 def sweep_once(conn=None):
     from lib.email_verification import imap_connect, FOLDERS, extract_links, pick_link, _IMAP_SLOTS
+    from lib.broker_replies import classify, is_broker_reply
     import requests
     stats = {"bounces": 0, "confirmations_opened": 0, "rows_failed": 0, "rows_removed": 0, "skipped": 0}
     # Share the process-wide IMAP session cap with the confirmation waits, so
@@ -190,6 +220,23 @@ def sweep_once(conn=None):
                     m.store(i, "+FLAGS", "\\Seen")
                     continue
 
+                # Everything else used to be left unread "for a person to look
+                # at", and nobody did. Classify it and put the broker's answer
+                # on the row. Still left unread, so a person can review it.
+                sender = str(msg.get("From", ""))
+                if is_broker_reply(sender):
+                    category = classify(subject, text)
+                    broker = (re.search(r"X-PD-Broker:\s*(\S+)", text) or [None, ""])[1]
+                    user_id = (re.search(r"X-PD-User:\s*(\d+)", text) or [None, ""])[1]
+                    if not broker:
+                        broker = _broker_from_sender(sender)
+                    if broker and user_id and category not in ("autoreply", "unclassified"):
+                        n = _record_reply(conn, int(user_id), broker, category, subject)
+                        if n:
+                            stats["replies_recorded"] = stats.get("replies_recorded", 0) + n
+                            stats.setdefault("by_category", {})
+                            stats["by_category"][category] = stats["by_category"].get(category, 0) + 1
+                            continue
                 stats["skipped"] += 1
     finally:
         try:
