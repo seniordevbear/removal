@@ -584,8 +584,14 @@ FACE_REMOVAL_UPLOAD_URL_TEMPLATE = os.getenv(
 
 SOCKET_SERVER_HOST = os.getenv("SOCKET_SERVER_HOST", "144.126.136.20")
 SOCKET_SERVER_PORT = _get_env_int("SOCKET_SERVER_PORT", 443)
-SOCKET_SERVER_SSL_CERT = os.getenv("SOCKET_SERVER_SSL_CERT", "C:/Certbot/live/sayloapp.com/fullchain.pem")
-SOCKET_SERVER_SSL_KEY = os.getenv("SOCKET_SERVER_SSL_KEY", "C:/Certbot/live/sayloapp.com/privkey.pem")
+# 2026-11-09 audit: these defaulted to C:/Certbot/live/sayloapp.com/... —
+# another project's domain, inherited with the codebase. If SOCKET_SERVER_USE_SSL
+# is on and the env vars are unset, the server would try to serve PrivacyDuck
+# traffic with a certificate for a site we do not own, or more likely fail to
+# start on a missing file. No default is safer than a wrong one: set both in
+# .env when SSL is wanted.
+SOCKET_SERVER_SSL_CERT = os.getenv("SOCKET_SERVER_SSL_CERT", "")
+SOCKET_SERVER_SSL_KEY = os.getenv("SOCKET_SERVER_SSL_KEY", "")
 SOCKET_SERVER_USE_SSL = _get_env_bool("SOCKET_SERVER_USE_SSL", True)
 
 log.info(
@@ -2683,7 +2689,17 @@ def runs(x):
     else:
         ssl_context = None
         if SOCKET_SERVER_USE_SSL:
-            ssl_context = (SOCKET_SERVER_SSL_CERT, SOCKET_SERVER_SSL_KEY)
+            # Say which file is missing rather than dying inside the server with
+            # a FileNotFoundError that names a path nobody set on purpose.
+            missing = [n for n, v in (("SOCKET_SERVER_SSL_CERT", SOCKET_SERVER_SSL_CERT),
+                                      ("SOCKET_SERVER_SSL_KEY", SOCKET_SERVER_SSL_KEY))
+                       if not v or not os.path.exists(v)]
+            if missing:
+                log.error("SOCKET_SERVER_USE_SSL is on but %s %s not usable — "
+                          "starting the socket server without TLS",
+                          " and ".join(missing), "is" if len(missing) == 1 else "are")
+            else:
+                ssl_context = (SOCKET_SERVER_SSL_CERT, SOCKET_SERVER_SSL_KEY)
         socketio.run(
             app,
             port=SOCKET_SERVER_PORT,

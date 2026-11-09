@@ -65,3 +65,10 @@ capture_forms/
 # The credential file itself is never committed (2026-10-10): it briefly
 # contained live mailbox and database passwords in this repo.
 .env
+
+# 2026-11-09 audit: 826 .pyc files and an expired self-signed TLS key
+# ("Internet Widgits Pty Ltd", notAfter Jul 2025, unreferenced by the code)
+# were tracked. Compiled bytecode is rebuilt on every run; a private key
+# never belongs in a repo even when it is a dead test key.
+cert.pem
+key.pem
