@@ -23,11 +23,36 @@ import csv
 import email
 import email.policy
 import imaplib
+import os
 import re
 import sys
 import time
 from collections import Counter
 from email.utils import parseaddr
+
+# .env has to be loaded before lib.email_verification is imported: it reads
+# CONFIRMATION_* at import time, and only manage.py was loading the file, so a
+# standalone tool saw nothing and reported the password as unset even on the
+# VPS where it is right there in .env.
+def _load_env_file(env_path):
+    """Same parser manage.py uses: KEY=value, # comments, real env wins."""
+    if not os.path.exists(env_path):
+        return False
+    with open(env_path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("'").strip('"')
+            if key and key not in os.environ:
+                os.environ[key] = value
+    return True
+
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ENV_FOUND = _load_env_file(os.path.join(_HERE, ".env"))
 
 from lib.email_verification import imap_connect, FOLDERS
 from lib.mailbox_sweep import _text, _broker_from_sender
@@ -102,7 +127,16 @@ def main():
     try:
         m = imap_connect()
     except Exception as e:
-        sys.exit("could not open the mailbox: %s\n(run this on the VPS, where .env has CONFIRMATION_*)" % e)
+        env = os.path.join(_HERE, ".env")
+        missing = [k for k in ("CONFIRMATION_EMAIL_USER", "CONFIRMATION_EMAIL_PASSWORD",
+                               "CONFIRMATION_IMAP_SERVER") if not os.getenv(k)]
+        sys.exit(
+            "could not open the mailbox: %s\n"
+            "  .env looked for at: %s  (%s)\n"
+            "  still unset after loading it: %s\n"
+            "  run this from the pipeline folder on the VPS, the one holding manage.py"
+            % (e, env, "found" if _ENV_FOUND else "NOT FOUND",
+               ", ".join(missing) or "none - so the server or password is being refused"))
 
     since = time.strftime("%d-%b-%Y", time.gmtime(time.time() - args.days * 86400))
     counts, examples, per_broker, rows = Counter(), {}, Counter(), []
