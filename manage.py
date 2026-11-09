@@ -111,6 +111,7 @@ def _load_env_file(env_path):
 _load_env_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 from lib.broker_helpers import (
+    CCPA_TOTAL_PER_DAY,
     CCPADailyLimitReached,
     ccpa_global_quota_reached,
     direct_send_quota_reached,
@@ -408,10 +409,9 @@ try:
     # failed before opening the page: 11 of the 22 failures on the afternoon
     # of 14 Oct. The ceiling lives in _HC_TIMEOUT alone.
     log.info("captcha solve ceiling: %s (hcaptcha %.0fs)", _TC_APPLY, _HC_TIMEOUT)
-log.info("daily e-mail budgets: CCPA_TOTAL_PER_DAY=%s, EMAIL_SENDER_TOTAL_PER_DAY=%s",
-         CCPA_TOTAL_PER_DAY, _get_env_int("EMAIL_SENDER_TOTAL_PER_DAY", 250))
 except Exception as _e:
     log.warning("twocaptcha timeout patch skipped (stock 600s reCAPTCHA ceiling stays): %s", _e)
+
 
 
 # ----- mirror print()/traceback output into the log file --------------------
@@ -591,6 +591,14 @@ SOCKET_SERVER_USE_SSL = _get_env_bool("SOCKET_SERVER_USE_SSL", True)
 log.info(
     "config removal_pacing min_interval_seconds=%s target_days=%s target_total=%s",
     REMOVAL_MIN_INTERVAL_SECONDS, REMOVAL_TARGET_DAYS_PER_USER, REMOVAL_TARGET_TOTAL_PER_USER,
+)
+
+# The cap sat on its 50 default for days while .env said 150, and nothing ever
+# printed which value was live - the only clue was removals landing on the same
+# number every night. Say it at startup.
+log.info(
+    "config e-mail budgets ccpa_per_day=%s direct_send_per_day=%s",
+    CCPA_TOTAL_PER_DAY, _get_env_int("EMAIL_SENDER_TOTAL_PER_DAY", 250),
 )
 
 
