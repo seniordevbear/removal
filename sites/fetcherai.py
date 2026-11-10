@@ -8,6 +8,7 @@ import random
 from time import sleep
 
 from lib.broker_helpers import (
+    missing_pii,
     safe_chromium_for_broker, screenshot_step, log_step, dismiss_common_consents, fill_field,
     submission_verdict,
 )
@@ -22,7 +23,7 @@ def fetcherai(dataRow, website_name, in_user_email, run_mode):
     broker = "fetcherai"
     name = (dataRow.get("Name") or "").strip()
     if not name:
-        raise RuntimeError(broker + ": no name on this profile")
+        raise missing_pii("name")
     first = name.split()[0]
     last = name.split()[-1]
 

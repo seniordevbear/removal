@@ -1,4 +1,5 @@
 from lib.broker_helpers import (
+    missing_pii,
     safe_chromium_for_broker, find_input, screenshot_step, log_step,
     _state_full_name,
 )
@@ -33,7 +34,12 @@ def dataaxlecom(dataRow, website_name, in_user_email, run_mode):
                               ("zip", zipc), ("email", email),
                               ("phone", phone)) if not v]
     if missing:
-        raise RuntimeError(broker + ": form requires " + ", ".join(missing))
+        # Verified against the 28 Oct capture: data-axle really does mark
+        # the address block (input_14.1-.5) and phone (input_10) required,
+        # so refusing is right - but it is missing customer data, not a
+        # broken script, and 118 paying customers were sitting in step=3
+        # looking like an engineering fault.
+        raise missing_pii(*missing)
 
     with safe_chromium_for_broker(broker,
                                   headless=(run_mode == "headless")) as page:

@@ -1,4 +1,5 @@
 from lib.broker_helpers import log_step, screenshot_step
+from lib.broker_helpers import missing_pii
 import os
 import datetime
 import requests
@@ -34,7 +35,7 @@ def faradayio(dataRow, website_name, in_user_email, run_mode):
     first = parts[0] if parts else ""
     last = parts[-1] if len(parts) > 1 else ""
     if not first or not last:
-        raise RuntimeError("faradayio: form requires first AND last name")
+        raise missing_pii("name")
 
     dob = ""
     if dataRow.get("Birth Year") and dataRow.get("Birth Month") and dataRow.get("Birth Day"):

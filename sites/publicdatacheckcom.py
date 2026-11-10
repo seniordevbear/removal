@@ -1,4 +1,5 @@
 from lib.broker_helpers import (
+    missing_pii,
     safe_chromium_for_broker, find_input, screenshot_step, log_step,
     _state_full_name, state_abbrev,
 )
@@ -22,7 +23,7 @@ def publicdatacheckcom(dataRow, website_name, in_user_email, run_mode):
     first = parts[0] if parts else ""
     last = parts[-1] if len(parts) > 1 else ""
     if not first or not last:
-        raise RuntimeError(broker + ": requires first and last name")
+        raise missing_pii("name")
     city = (dataRow.get("City") or "").strip()
     zipc = (dataRow.get("Zipcode") or "").strip()
     age = str(dataRow.get("Age") or "").strip()

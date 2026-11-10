@@ -1,4 +1,5 @@
 from lib.broker_helpers import (
+    missing_pii,
     safe_chromium_for_broker, find_input, screenshot_step, log_step,
 )
 from lib.common import generate_email
@@ -20,7 +21,7 @@ def fastbackgroundcheckcom(dataRow, website_name, in_user_email, run_mode):
     first = parts[0] if parts else ""
     last = parts[-1] if len(parts) > 1 else ""
     if not first or not last:
-        raise RuntimeError(broker + ": form requires first AND last name")
+        raise missing_pii("name")
 
     with safe_chromium_for_broker(broker,
                                   headless=(run_mode == "headless")) as page:

@@ -1,4 +1,5 @@
 from lib.broker_helpers import (
+    missing_pii,
     safe_chromium_for_broker, find_input, screenshot_step, log_step,
     _state_full_name,
 )
@@ -21,7 +22,7 @@ def insideviewcom(dataRow, website_name, in_user_email, run_mode):
     first = parts[0] if parts else ""
     last = parts[-1] if len(parts) > 1 else ""
     if not first or not last:
-        raise RuntimeError(broker + ": form requires first and last name")
+        raise missing_pii("name")
     state = _state_full_name(dataRow.get("State") or "") or (dataRow.get("State") or "")
 
     url = ("https://www.demandbase.com/privacy-center.html"

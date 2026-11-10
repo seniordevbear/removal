@@ -1,4 +1,5 @@
 from lib.broker_helpers import (
+    missing_pii,
     safe_chromium_for_broker, find_input, screenshot_step, log_step,
     _state_full_name,
 )
@@ -21,8 +22,9 @@ def privateeyecom(dataRow, website_name, in_user_email, run_mode):
     first = parts[0] if parts else ""
     last = parts[-1] if len(parts) > 1 else ""
     email = dataRow.get("User Email") or in_user_email
-    if not (first and last and email):
-        raise RuntimeError(broker + ": requires name and email")
+    missing = [k for k, v in (("name", first and last), ("email", email)) if not v]
+    if missing:
+        raise missing_pii(*missing)
 
     with safe_chromium_for_broker(broker,
                                   headless=(run_mode == "headless")) as page:

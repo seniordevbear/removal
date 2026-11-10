@@ -1,4 +1,5 @@
 from lib.broker_helpers import (
+    missing_pii,
     safe_chromium_for_broker, find_input, screenshot_step, log_step,
     state_abbrev,
 )
@@ -23,8 +24,14 @@ def audienceacuitycom(dataRow, website_name, in_user_email, run_mode):
     city = (dataRow.get("City") or "").strip()
     zipc = (dataRow.get("Zipcode") or "").strip()
     email = dataRow.get("User Email") or in_user_email
-    if not (first and last and email):
-        raise RuntimeError(broker + ": form requires name and email")
+    missing = [k for k, v in (("name", first and last), ("email", email)) if not v]
+    if missing:
+        # step=5 "needs user data", not step=3 "the script broke". The
+        # difference decides who acts: staff ask the customer for the
+        # missing detail, or an engineer goes looking for a bug that is
+        # not there. It also stops the crash budget retrying a row that
+        # cannot succeed until the profile changes.
+        raise missing_pii(*missing)
 
     with safe_chromium_for_broker(broker,
                                   headless=(run_mode == "headless")) as page:
