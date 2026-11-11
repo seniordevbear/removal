@@ -2185,6 +2185,24 @@ _captcha_hold = {"until": 0.0, "why": "", "wait": 0.0, "seen": set()}
 _CAPTCHA_DOMAINS_CACHE = None
 
 
+def _stamp_captcha_outage(conn, row_id):
+    """Requeue a row the captcha service failed, leaving a trace."""
+    cur = conn.cursor()
+    try:
+        _execute_with_lock_retry(
+            cur,
+            "UPDATE results SET step = 0, "
+            "  data = JSON_SET(COALESCE(data, '{}'), '$.captcha_outage_at', NOW()) "
+            "WHERE id = %s",
+            (row_id,))
+        conn.commit()
+    except Exception:
+        log.exception("captcha outage stamp failed id=%s; plain requeue instead", row_id)
+        _set_step(conn, row_id, 0)
+    finally:
+        cur.close()
+
+
 def _is_captcha_outage(exc):
     text = type(exc).__name__ + ": " + str(exc)
     return any(m in text for m in _CAPTCHA_OUTAGE_MARKERS)
@@ -2382,7 +2400,14 @@ def _process_removal_row(row):
         except Exception as e:
             if _is_captcha_outage(e):
                 _note_captcha_outage(e, row["target_domain"])
-                _set_step(conn, row["id"], 0)
+                # Not _set_step(..., 0): the row is already step=0 and has no
+                # error keys, so that UPDATE changes nothing and MySQL leaves
+                # updated_at alone. 1,221 outage requeues on 10 Nov left 196
+                # traces in the table - the outage was invisible to anything
+                # reading the database, the watchdog included. Stamping the
+                # row makes every requeue a real write, so the churn can be
+                # counted from here as well as from the VPS log.
+                _stamp_captcha_outage(conn, row["id"])
                 log.info("captcha outage: id=%s %s requeued untouched", row["id"], row["target_domain"])
                 last_removal_processed_at.set(user_id_str, time.time())
                 return
