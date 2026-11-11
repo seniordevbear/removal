@@ -148,12 +148,59 @@ def _record_reply(conn, user_id, broker, category, subject):
             "  '$.broker_reply_at', NOW(), "
             "  '$.broker_reply_subject', %s), "
             "  updated_at = updated_at "
-            "WHERE user_id = %s AND target_domain = %s AND kind = 1",
-            (category, (subject or "")[:180], user_id, broker))
+            "WHERE user_id = %s AND target_domain IN (%s, %s, %s) AND kind = 1",
+            (category, (subject or "")[:180], user_id, broker, broker + "us", broker + "eu"))
         conn.commit()
         return cur.rowcount
     finally:
         cur.close()
+
+
+_QUOTED_EMAIL = re.compile(r"Email:\s*<?([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})>?", re.I)
+_SUBJECT_NAME = re.compile(r"Request\s*-\s*(.+?)\s*$", re.I)
+
+
+def _resolve_user(conn, text, subject):
+    """Find which customer a broker reply is about.
+
+    The sweep recorded nothing for its first two days - 'skipped': 424 on
+    every run - because it wanted X-PD-User, and that header only survives
+    inside a bounce's attached original. A broker answering by hand does not
+    attach our mail; it quotes it. Two things in the quote identify the
+    customer, in order of trust:
+
+      1. the body line we wrote, "  Email:   jane@example.com" - exact match
+         against users.email;
+      2. the subject we wrote, "... Request - Jane Smith", carried back as
+         "Re: ... Request - Jane Smith" - used only when exactly one account
+         has that first+last name, because two Jane Smiths would mean guessing.
+    """
+    if not conn:
+        return None
+    m = _QUOTED_EMAIL.search(text or "")
+    if m:
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT id FROM users WHERE email = %s LIMIT 2", (m.group(1).strip().lower(),))
+            hits = cur.fetchall()
+        finally:
+            cur.close()
+        if len(hits) == 1:
+            return int(hits[0][0])
+    m = _SUBJECT_NAME.search(re.sub(r"^\s*(re|fw|fwd)\s*:\s*", "", subject or "", flags=re.I))
+    if m:
+        parts = m.group(1).split()
+        if len(parts) >= 2:
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT id FROM users WHERE firstname = %s AND lastname = %s LIMIT 2",
+                            (parts[0], parts[-1]))
+                hits = cur.fetchall()
+            finally:
+                cur.close()
+            if len(hits) == 1:
+                return int(hits[0][0])
+    return None
 
 
 def sweep_once(conn=None):
@@ -230,6 +277,8 @@ def sweep_once(conn=None):
                     user_id = (re.search(r"X-PD-User:\s*(\d+)", text) or [None, ""])[1]
                     if not broker:
                         broker = _broker_from_sender(sender)
+                    if not user_id and category not in ("autoreply", "unclassified"):
+                        user_id = _resolve_user(conn, text, subject)
                     if broker and user_id and category not in ("autoreply", "unclassified"):
                         n = _record_reply(conn, int(user_id), broker, category, subject)
                         if n:

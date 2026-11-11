@@ -734,6 +734,16 @@ def _db_connect(attempts=3, backoff=2.0):
                 cur = conn.cursor()
                 cur.execute("SET SESSION innodb_lock_wait_timeout = %s"
                             % _get_env_int("DB_LOCK_WAIT_TIMEOUT", 15))
+                # 2026-11-11: the watchdog exited at 00:57 on 10 Nov after the
+                # removal loop sat 2,752s with its thread inside ssl.read(),
+                # and the one tick failure in the log is a fetchall() that
+                # the 120s socket timeout eventually cut. Letting the server
+                # kill a SELECT that runs past this point means the client is
+                # told "query interrupted" in seconds and the loop keeps
+                # ticking, instead of waiting out the socket timeout once per
+                # attempt until the watchdog restarts everything.
+                cur.execute("SET SESSION MAX_EXECUTION_TIME = %s"
+                            % _get_env_int("DB_MAX_EXECUTION_MS", 90000))
                 cur.close()
             except Exception:
                 log.warning("could not set innodb_lock_wait_timeout", exc_info=True)
@@ -2171,7 +2181,7 @@ CAPTCHA_OUTAGE_HOLD_SECONDS = _get_env_float("CAPTCHA_OUTAGE_HOLD_SECONDS", 1800
 # costs a handful of attempts instead of hundreds, while a balance topped up at
 # noon is still noticed within the hour.
 CAPTCHA_OUTAGE_HOLD_MAX_SECONDS = _get_env_float("CAPTCHA_OUTAGE_HOLD_MAX_SECONDS", 14400.0)
-_captcha_hold = {"until": 0.0, "why": "", "wait": 0.0}
+_captcha_hold = {"until": 0.0, "why": "", "wait": 0.0, "seen": set()}
 _CAPTCHA_DOMAINS_CACHE = None
 
 
@@ -2181,9 +2191,11 @@ def _is_captcha_outage(exc):
 
 
 def _captcha_domains():
-    """Brokers whose script solves a captcha, discovered once from sites/
-    the way _email_broker_domains is: 122 scripts build their own TwoCaptcha,
-    two go through the lib helpers."""
+    """Brokers whose script can reach a captcha solver, discovered once from
+    sites/ the way _email_broker_domains is. Static discovery can only see
+    what the source says; _note_captcha_outage adds any broker that proves it
+    at runtime, so a path this list has not heard of is still held after its
+    first failure."""
     global _CAPTCHA_DOMAINS_CACHE
     if _CAPTCHA_DOMAINS_CACHE is None:
         found = set()
@@ -2197,8 +2209,19 @@ def _captcha_domains():
                         body = f.read()
                 except OSError:
                     continue
+                # 2026-11-11: this matched 124 scripts and missed the ones that
+                # actually run. alaskaarrestsorg produced 733 captcha-outage
+                # requeues on 10 Nov and was never held, because it reaches
+                # 2captcha through run_arrests_org_optout; fastbackgroundcheck
+                # and socialcatfish go through lib.captcha.get_solver(); the
+                # infopay family through run_infopay_optout. Every path a
+                # script can take to a solver is listed here, and a retired
+                # script is left out so the count means something.
+                if "raise NotImplementedError" in body:
+                    continue
                 if ("TwoCaptcha(" in body or "solve_image_captcha_element(" in body
-                        or "set_turnstile_response(" in body):
+                        or "set_turnstile_response(" in body or "get_solver(" in body
+                        or "run_arrests_org_optout" in body or "run_infopay_optout" in body):
                     found.add(fname[:-3])
         except OSError:
             log.exception("could not scan sites/ for captcha brokers")
@@ -2222,6 +2245,12 @@ def _note_captcha_outage(exc, domain):
         wait = _captcha_hold["wait"] or CAPTCHA_OUTAGE_HOLD_SECONDS
     _captcha_hold["until"] = now + wait
     _captcha_hold["why"] = _why(exc)
+    # Whatever the static scan thought, this broker just proved it needs the
+    # solver. Hold it by name from here on.
+    if domain and domain not in _captcha_hold["seen"]:
+        _captcha_hold["seen"].add(domain)
+        if domain not in _captcha_domains():
+            log.warning("captcha broker not in the discovered set, holding it by name: %s", domain)
     if fresh:
         log.warning("CAPTCHA SERVICE UNUSABLE (%s on %s): holding %d captcha broker(s) "
                     "out of selection for %.0f min - check the 2captcha balance/key",
@@ -2230,7 +2259,9 @@ def _note_captcha_outage(exc, domain):
 
 
 def _captcha_held_domains():
-    return _captcha_domains() if time.time() < _captcha_hold["until"] else set()
+    if time.time() >= _captcha_hold["until"]:
+        return set()
+    return _captcha_domains() | _captcha_hold["seen"]
 
 
 def _process_removal_row(row):
